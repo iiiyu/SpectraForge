@@ -37,7 +37,7 @@ running `cargo`:
 
 ```bash
 export DYLD_FALLBACK_LIBRARY_PATH="$(brew --prefix mesa)/lib:${DYLD_FALLBACK_LIBRARY_PATH:-}"
-cargo run --release -- --input song.mp3 --shader vis.glsl --output out.mp4
+cargo run --release -- --input song.mp3 --shader shaders/vis.glsl --output out.mp4
 ```
 
 Or point SpectraForge directly at the EGL library:
@@ -52,8 +52,8 @@ startup. This keeps GLSL shader compatibility while using Apple's hardware path.
 Mesa EGL remains available as a fallback or for non-interactive environments:
 
 ```bash
-SPECTRAFORGE_RENDER_BACKEND=metal cargo run --release -- --input song.mp3 --shader vis.glsl --output out.mp4
-SPECTRAFORGE_RENDER_BACKEND=egl cargo run --release -- --input song.mp3 --shader vis.glsl --output out.mp4
+SPECTRAFORGE_RENDER_BACKEND=metal cargo run --release -- --input song.mp3 --shader shaders/vis.glsl --output out.mp4
+SPECTRAFORGE_RENDER_BACKEND=egl cargo run --release -- --input song.mp3 --shader shaders/vis.glsl --output out.mp4
 ```
 
 This is a Metal-backed OpenGL path, not a direct Metal Shading Language backend.
@@ -64,8 +64,8 @@ macOS also defaults to FFmpeg's hardware H.264 encoder (`h264_videotoolbox`).
 Override the encoder or bitrate if needed:
 
 ```bash
-SPECTRAFORGE_VIDEO_CODEC=libx264 cargo run --release -- --input song.mp3 --shader vis.glsl --output out.mp4
-SPECTRAFORGE_VIDEO_BITRATE=24M cargo run --release -- --input song.mp3 --shader vis.glsl --output out.mp4
+SPECTRAFORGE_VIDEO_CODEC=libx264 cargo run --release -- --input song.mp3 --shader shaders/vis.glsl --output out.mp4
+SPECTRAFORGE_VIDEO_BITRATE=24M cargo run --release -- --input song.mp3 --shader shaders/vis.glsl --output out.mp4
 ```
 
 To keep that setting for future zsh sessions:
@@ -92,7 +92,7 @@ uv tool update-shell
 When you want lyrics, run SpectraForge from a shell where `whisper` is available:
 
 ```bash
-cargo run --release -- --input song.mp3 --shader vis.glsl --output out.mp4 --lyrics
+cargo run --release -- --input song.mp3 --shader shaders/vis.glsl --output out.mp4 --lyrics
 ```
 
 ### Linux / WSL2
@@ -109,13 +109,13 @@ but is slower than hardware rendering.
 ## Usage
 
 ```bash
-cargo run --release -- --input song.mp3 --shader vis.glsl --output out.mp4 \
+cargo run --release -- --input song.mp3 --shader shaders/vis.glsl --output out.mp4 \
     [--width 1280] [--height 720] [--fps 30]
 
-cargo run --release -- --input song.mp3 --shader vis.glsl --output out.mp4 --width 1920 --height 1080 --fps 30
+cargo run --release -- --input song.mp3 --shader shaders/vis.glsl --output out.mp4 --width 1920 --height 1080 --fps 30
 
 # Inspect audio features without rendering:
-cargo run -- --input song.mp3 --shader vis.glsl --output x.mp4 --dump-features
+cargo run -- --input song.mp3 --shader shaders/vis.glsl --output x.mp4 --dump-features
 ```
 
 ### Lyrics as subtitles
@@ -123,11 +123,11 @@ cargo run -- --input song.mp3 --shader vis.glsl --output x.mp4 --dump-features
 Transcribe the song with whisper and burn the lyrics into the video:
 
 ```bash
-cargo run --release -- --input song.mp3 --shader vis.glsl --output out.mp4 \
+cargo run --release -- --input song.mp3 --shader shaders/vis.glsl --output out.mp4 \
     --lyrics [--whisper-model medium] [--whisper-cmd whisper]
 
 # Or supply your own subtitle file (skips transcription):
-cargo run --release -- --input song.mp3 --shader vis.glsl --output out.mp4 \
+cargo run --release -- --input song.mp3 --shader shaders/vis.glsl --output out.mp4 \
     --subtitles song.srt
 ```
 
@@ -143,4 +143,5 @@ Shadertoy-style: define `mainImage`. These uniforms are injected automatically:
 | `iBass` `iMid` `iTreble` | `float`     | band energies (20–250 / 250–4k / 4k–20k Hz)           |
 | `iSpectrum`              | `sampler2D` | 64×1 texture; sample `.r` for a log-spaced bin (0..1) |
 
-See `vis.glsl` for a working example.
+Example shaders live under `shaders/`. See `shaders/vis.glsl` for a working
+example.

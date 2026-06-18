@@ -9,6 +9,7 @@ Pipeline: `mp3 → decode → per-frame FFT analysis → GLSL uniforms → headl
 - **ffmpeg** on `PATH` (used for both decoding deps and final encoding).
 - **Mesa EGL** for headless OpenGL: `libegl1`, `libgl1-mesa-dri`.
   On WSL2 this falls back to software (`llvmpipe`) — works, just slower.
+- **whisper** on `PATH` (only for `--lyrics`): `pip install openai-whisper`.
 
 ## Usage
 
@@ -18,6 +19,19 @@ cargo run --release -- --input song.mp3 --shader vis.glsl --output out.mp4 \
 
 # Inspect audio features without rendering:
 cargo run -- --input song.mp3 --shader vis.glsl --output x.mp4 --dump-features
+```
+
+### Lyrics as subtitles
+
+Transcribe the song with whisper and burn the lyrics into the video:
+
+```bash
+cargo run --release -- --input song.mp3 --shader vis.glsl --output out.mp4 \
+    --lyrics [--whisper-model medium] [--whisper-cmd whisper]
+
+# Or supply your own subtitle file (skips transcription):
+cargo run --release -- --input song.mp3 --shader vis.glsl --output out.mp4 \
+    --subtitles song.srt
 ```
 
 ## Writing a shader

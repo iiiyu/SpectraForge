@@ -1,6 +1,7 @@
 mod analysis;
 mod audio;
 mod encode;
+mod lyrics;
 mod render;
 
 use anyhow::{Context, Result};
@@ -32,6 +33,22 @@ struct Args {
     #[arg(long, default_value_t = 30)]
     fps: u32,
 
+    /// Transcribe lyrics with whisper and burn them into the video as subtitles
+    #[arg(long)]
+    lyrics: bool,
+
+    /// Whisper command to invoke for transcription
+    #[arg(long, default_value = "whisper")]
+    whisper_cmd: String,
+
+    /// Whisper model to use (e.g. tiny, base, small, medium, large)
+    #[arg(long, default_value = "medium")]
+    whisper_model: String,
+
+    /// Use an existing .srt subtitle file instead of transcribing
+    #[arg(long)]
+    subtitles: Option<PathBuf>,
+
     /// Print audio features per frame and exit (no rendering)
     #[arg(long)]
     dump_features: bool,
@@ -60,14 +77,32 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Resolve subtitles: an explicit .srt wins; otherwise transcribe if asked.
+    let subtitles = match (&args.subtitles, args.lyrics) {
+        (Some(srt), _) => Some(srt.clone()),
+        (None, true) => {
+            let out_dir = args.output.parent().filter(|p| !p.as_os_str().is_empty());
+            let out_dir = out_dir.unwrap_or_else(|| std::path::Path::new("."));
+            lyrics::transcribe(&args.input, &args.whisper_cmd, &args.whisper_model, out_dir)
+                .context("transcribing lyrics")?
+        }
+        (None, false) => None,
+    };
+
     let shader_src = std::fs::read_to_string(&args.shader)
         .with_context(|| format!("reading shader {}", args.shader.display()))?;
 
     let mut renderer = render::Renderer::new(args.width, args.height, &shader_src)
         .context("initializing renderer")?;
-    let mut encoder =
-        encode::Encoder::new(&args.output, &args.input, args.width, args.height, args.fps)
-            .context("starting ffmpeg encoder")?;
+    let mut encoder = encode::Encoder::new(
+        &args.output,
+        &args.input,
+        args.width,
+        args.height,
+        args.fps,
+        subtitles.as_deref(),
+    )
+    .context("starting ffmpeg encoder")?;
 
     for i in 0..total_frames {
         let t = i as f32 / args.fps as f32;

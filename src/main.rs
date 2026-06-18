@@ -53,7 +53,7 @@ struct Args {
     #[arg(long, default_value = "medium")]
     whisper_model: String,
 
-    /// Use an existing .srt subtitle file instead of transcribing
+    /// Use an existing .srt subtitle file or Whisper .json instead of transcribing
     #[arg(long)]
     subtitles: Option<PathBuf>,
 
@@ -122,7 +122,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Resolve subtitles: an explicit .srt wins; otherwise transcribe if asked.
+    // Resolve subtitles: an explicit subtitle file wins; otherwise transcribe if asked.
     let subtitles = match (&args.subtitles, args.lyrics) {
         (Some(srt), _) => Some(srt.clone()),
         (None, true) => {
@@ -140,7 +140,7 @@ fn main() -> Result<()> {
                 SubtitleStyle::Mv => lyrics::OverlayStyle::Mv,
             };
             Some(
-                lyrics::LyricOverlay::from_srt(
+                lyrics::LyricOverlay::from_subtitles(
                     &path,
                     args.width,
                     args.height,

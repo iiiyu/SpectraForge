@@ -143,6 +143,14 @@ word highlighting. The lyrics are composited into each RGB frame before ffmpeg
 encodes the final MP4, so this does not depend on ffmpeg's `subtitles`,
 `drawtext`, or libass filters.
 
+`--lyrics` asks whisper for a `.json` transcript with `--word_timestamps True`
+and uses those per-word times for karaoke highlighting, so the first word does
+not highlight before its actual timestamp. `--subtitles` accepts either `.srt`
+or whisper `.json`; SRT has only cue-level timing, so SpectraForge applies a
+small first-word delay as a fallback. To reduce Whisper tail hallucinations,
+cue-like phrases with more than 3 words but less than 0.5s of source timing are
+dropped before rendering.
+
 ```bash
 cargo run --release -- --input song.mp3 --shader shaders/rover_seasons_loop.glsl --output out.mp4 \
     --lyrics \
@@ -151,7 +159,7 @@ cargo run --release -- --input song.mp3 --shader shaders/rover_seasons_loop.glsl
 
 # Use fonts from a custom font directory:
 cargo run --release -- --input song.mp3 --shader shaders/vis.glsl --output out.mp4 \
-    --subtitles song.srt \
+    --subtitles song.json \
     --subtitle-font "My Display Font" \
     --subtitle-fonts-dir ./fonts
 

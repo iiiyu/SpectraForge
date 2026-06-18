@@ -2,7 +2,7 @@
 
 Turn an MP3 into an audio-reactive video driven by a GLSL fragment shader.
 
-Pipeline: `mp3 → decode → per-frame FFT analysis → GLSL uniforms → headless render → ffmpeg → mp4`
+Pipeline: `mp3 → decode/duration → GLSL uniforms → headless render → styled lyrics/audio mux → mp4`
 
 ## Prerequisites
 
@@ -114,9 +114,15 @@ cargo run --release -- --input song.mp3 --shader shaders/vis.glsl --output out.m
 
 cargo run --release -- --input song.mp3 --shader shaders/vis.glsl --output out.mp4 --width 1920 --height 1080 --fps 30
 
+# Use the MP3 only for duration/output audio; shader audio uniforms stay silent:
+cargo run --release -- --input song.mp3 --shader shaders/rover_seasons_loop.glsl --output out.mp4 --duration-only
+
 # Inspect audio features without rendering:
 cargo run -- --input song.mp3 --shader shaders/vis.glsl --output x.mp4 --dump-features
 ```
+
+Rendered videos include the input MP3 audio track. `--duration-only` only turns
+off audio-reactive shader features; it does not mute or remove the output audio.
 
 ### Lyrics as subtitles
 
@@ -129,6 +135,29 @@ cargo run --release -- --input song.mp3 --shader shaders/vis.glsl --output out.m
 # Or supply your own subtitle file (skips transcription):
 cargo run --release -- --input song.mp3 --shader shaders/vis.glsl --output out.mp4 \
     --subtitles song.srt
+```
+
+Lyrics default to SpectraForge's built-in animated MV/TikTok-style renderer with
+a bold custom font, black outline/shadow, fade/slide/scale motion, and timed
+word highlighting. The lyrics are composited into each RGB frame before ffmpeg
+encodes the final MP4, so this does not depend on ffmpeg's `subtitles`,
+`drawtext`, or libass filters.
+
+```bash
+cargo run --release -- --input song.mp3 --shader shaders/rover_seasons_loop.glsl --output out.mp4 \
+    --lyrics \
+    --subtitle-font "Arial Rounded MT Bold" \
+    --subtitle-font-size 72
+
+# Use fonts from a custom font directory:
+cargo run --release -- --input song.mp3 --shader shaders/vis.glsl --output out.mp4 \
+    --subtitles song.srt \
+    --subtitle-font "My Display Font" \
+    --subtitle-fonts-dir ./fonts
+
+# Keep the old plain subtitle renderer:
+cargo run --release -- --input song.mp3 --shader shaders/vis.glsl --output out.mp4 \
+    --lyrics --subtitle-style plain
 ```
 
 ## Writing a shader

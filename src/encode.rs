@@ -16,21 +16,17 @@ impl Encoder {
         width: u32,
         height: u32,
         fps: u32,
-        subtitles: Option<&Path>,
     ) -> Result<Self> {
         let mut cmd = Command::new("ffmpeg");
-        cmd.args(["-y", "-f", "rawvideo", "-pix_fmt", "rgb24"])
+        cmd.args(["-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24"])
             .args(["-s", &format!("{width}x{height}")])
             .args(["-r", &fps.to_string()])
             .args(["-i", "-"]) // video frames from stdin
             .arg("-i")
             .arg(audio_path); // audio from original file
 
-        // Burn lyrics onto the video stream via libass.
-        if let Some(srt) = subtitles {
-            cmd.arg("-vf")
-                .arg(format!("subtitles={}", escape_filter_path(srt)));
-        }
+        // Be explicit: raw frames provide the video stream, input audio provides the sound.
+        cmd.args(["-map", "0:v:0", "-map", "1:a:0"]);
 
         let video_codec = std::env::var("SPECTRAFORGE_VIDEO_CODEC")
             .unwrap_or_else(|_| default_video_codec().to_string());
@@ -46,7 +42,7 @@ impl Encoder {
             .arg(output)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .context("spawning ffmpeg (is it installed and on PATH?)")?;
         Ok(Self { child })
@@ -66,23 +62,20 @@ impl Encoder {
     /// Close stdin and wait for ffmpeg to finish encoding.
     pub fn finish(mut self) -> Result<()> {
         drop(self.child.stdin.take()); // EOF on stdin
-        let status = self.child.wait().context("waiting for ffmpeg")?;
-        if !status.success() {
-            bail!("ffmpeg exited with status {status}");
+        let output = self
+            .child
+            .wait_with_output()
+            .context("waiting for ffmpeg")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!(
+                "ffmpeg exited with status {}: {}",
+                output.status,
+                stderr.trim()
+            );
         }
         Ok(())
     }
-}
-
-/// Escape a path for use inside the `subtitles=` filter argument, where `:`,
-/// `\`, and `'` are metacharacters. The path is wrapped in single quotes.
-fn escape_filter_path(path: &Path) -> String {
-    let s = path.to_string_lossy();
-    let escaped = s
-        .replace('\\', "\\\\")
-        .replace(':', "\\:")
-        .replace('\'', "\\'");
-    format!("'{escaped}'")
 }
 
 fn default_video_codec() -> &'static str {

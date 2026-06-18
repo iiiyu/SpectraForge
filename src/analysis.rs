@@ -13,6 +13,17 @@ pub struct Features {
     pub spectrum: Vec<f32>,
 }
 
+/// A fixed, non-reactive feature set for renders that only use audio duration.
+pub fn silent() -> Features {
+    Features {
+        rms: 0.0,
+        bass: 0.0,
+        mid: 0.0,
+        treble: 0.0,
+        spectrum: vec![0.0; SPECTRUM_BINS],
+    }
+}
+
 /// Analyze a Hann-windowed FFT_SIZE window centered at `time` seconds.
 pub fn analyze(samples: &[f32], sample_rate: u32, time: f32) -> Features {
     let center = (time * sample_rate as f32) as isize;
@@ -108,5 +119,15 @@ mod tests {
             f.treble
         );
         assert!(f.rms > 0.1, "rms {} should be substantial", f.rms);
+    }
+
+    #[test]
+    fn silent_features_are_zeroed() {
+        let f = silent();
+        assert_eq!(f.rms, 0.0);
+        assert_eq!(f.bass, 0.0);
+        assert_eq!(f.mid, 0.0);
+        assert_eq!(f.treble, 0.0);
+        assert_eq!(f.spectrum, vec![0.0; SPECTRUM_BINS]);
     }
 }

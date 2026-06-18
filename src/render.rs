@@ -2,19 +2,19 @@ use crate::analysis::{Features, SPECTRUM_BINS};
 use anyhow::{Context, Result, bail};
 use glow::HasContext;
 use khronos_egl as egl;
+use std::ffi::c_void;
 
-/// Headless OpenGL renderer: an EGL pbuffer context drawing a fullscreen quad
-/// with the user's fragment shader into an off-screen framebuffer.
+/// Headless OpenGL renderer: an off-screen framebuffer drawing a fullscreen
+/// quad with the user's fragment shader.
 pub struct Renderer {
-    // EGL handles are kept alive for the lifetime of the renderer.
-    _egl: egl::DynamicInstance<egl::EGL1_5>,
-    _display: egl::Display,
-    _context: egl::Context,
-    _surface: egl::Surface,
+    // The backend context must stay alive while GL objects exist.
+    _backend: GlBackend,
 
     gl: glow::Context,
     program: glow::Program,
     vao: glow::VertexArray,
+    framebuffer: glow::Framebuffer,
+    color_tex: glow::Texture,
     spectrum_tex: glow::Texture,
     width: u32,
     height: u32,
@@ -53,80 +53,90 @@ void main() {
 }
 "#;
 
+const EGL_PLATFORM_SURFACELESS_MESA: egl::Enum = 0x31DD;
+
 impl Renderer {
     pub fn new(width: u32, height: u32, user_shader: &str) -> Result<Self> {
-        // --- EGL: headless pbuffer context ---
-        let egl = unsafe { egl::DynamicInstance::<egl::EGL1_5>::load_required() }
-            .map_err(|e| anyhow::anyhow!("loading libEGL: {e}"))?;
+        let backend = GlBackend::create(width, height)?;
 
-        let display = unsafe {
-            egl.get_display(egl::DEFAULT_DISPLAY)
-                .context("no EGL default display")?
-        };
-        egl.initialize(display).context("eglInitialize failed")?;
-
-        let config_attrs = [
-            egl::SURFACE_TYPE,
-            egl::PBUFFER_BIT,
-            egl::RENDERABLE_TYPE,
-            egl::OPENGL_BIT,
-            egl::RED_SIZE,
-            8,
-            egl::GREEN_SIZE,
-            8,
-            egl::BLUE_SIZE,
-            8,
-            egl::NONE,
-        ];
-        let config = egl
-            .choose_first_config(display, &config_attrs)
-            .context("eglChooseConfig failed")?
-            .context("no matching EGL config")?;
-
-        egl.bind_api(egl::OPENGL_API)
-            .context("eglBindAPI(OpenGL) failed")?;
-
-        let surface_attrs = [
-            egl::WIDTH,
-            width as i32,
-            egl::HEIGHT,
-            height as i32,
-            egl::NONE,
-        ];
-        let surface = egl
-            .create_pbuffer_surface(display, config, &surface_attrs)
-            .context("creating pbuffer surface")?;
-
-        let context_attrs = [
-            egl::CONTEXT_MAJOR_VERSION,
-            3,
-            egl::CONTEXT_MINOR_VERSION,
-            3,
-            egl::NONE,
-        ];
-        let context = egl
-            .create_context(display, config, None, &context_attrs)
-            .context("creating GL 3.3 context")?;
-        egl.make_current(display, Some(surface), Some(surface), Some(context))
-            .context("eglMakeCurrent failed")?;
-
-        // --- glow: load GL functions via EGL ---
-        let gl = unsafe {
-            glow::Context::from_loader_function(|s| {
-                egl.get_proc_address(s)
-                    .map_or(std::ptr::null(), |p| p as *const _)
-            })
-        };
+        let gl =
+            unsafe { glow::Context::from_loader_function(|name| backend.get_proc_address(name)) };
 
         unsafe {
+            let vendor = gl.get_parameter_string(glow::VENDOR);
+            let renderer_name = gl.get_parameter_string(glow::RENDERER);
+            let version = gl.get_parameter_string(glow::VERSION);
+            eprintln!(
+                "OpenGL backend: {} | vendor: {vendor} | renderer: {renderer_name} | version: {version}",
+                backend.label()
+            );
+
+            gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+
             let program = compile_program(&gl, user_shader)?;
             let vao = gl
                 .create_vertex_array()
                 .map_err(|e| anyhow::anyhow!("VAO: {e}"))?;
 
+            let framebuffer = gl
+                .create_framebuffer()
+                .map_err(|e| anyhow::anyhow!("framebuffer: {e}"))?;
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+
+            let color_tex = gl
+                .create_texture()
+                .map_err(|e| anyhow::anyhow!("color texture: {e}"))?;
+            gl.bind_texture(glow::TEXTURE_2D, Some(color_tex));
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::LINEAR as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::LINEAR as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_S,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_T,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA8 as i32,
+                width as i32,
+                height as i32,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(None),
+            );
+            gl.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(color_tex),
+                0,
+            );
+            gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+            gl.read_buffer(glow::COLOR_ATTACHMENT0);
+            let framebuffer_status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
+            if framebuffer_status != glow::FRAMEBUFFER_COMPLETE {
+                bail!("off-screen framebuffer incomplete: 0x{framebuffer_status:x}");
+            }
+
             let spectrum_tex = gl
                 .create_texture()
-                .map_err(|e| anyhow::anyhow!("texture: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("spectrum texture: {e}"))?;
+            gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(spectrum_tex));
             gl.tex_parameter_i32(
                 glow::TEXTURE_2D,
@@ -148,44 +158,7 @@ impl Renderer {
                 glow::TEXTURE_WRAP_T,
                 glow::CLAMP_TO_EDGE as i32,
             );
-
-            gl.viewport(0, 0, width as i32, height as i32);
-
-            let loc = |name: &str| gl.get_uniform_location(program, name);
-            let renderer = Renderer {
-                u_resolution: loc("iResolution"),
-                u_time: loc("iTime"),
-                u_rms: loc("iRMS"),
-                u_bass: loc("iBass"),
-                u_mid: loc("iMid"),
-                u_treble: loc("iTreble"),
-                u_spectrum: loc("iSpectrum"),
-                _egl: egl,
-                _display: display,
-                _context: context,
-                _surface: surface,
-                gl,
-                program,
-                vao,
-                spectrum_tex,
-                width,
-                height,
-                pixels: vec![0u8; (width * height * 3) as usize],
-            };
-            Ok(renderer)
-        }
-    }
-
-    /// Render one frame and return its rgb24 bytes (top-to-bottom).
-    pub fn render_frame(&mut self, time: f32, f: &Features) -> &[u8] {
-        let gl = &self.gl;
-        unsafe {
-            gl.use_program(Some(self.program));
-            gl.bind_vertex_array(Some(self.vao));
-
-            // Upload spectrum as a 1D (Nx1) R32F texture on unit 0.
-            gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.spectrum_tex));
+            let empty_spectrum = [0.0f32; SPECTRUM_BINS];
             gl.tex_image_2d(
                 glow::TEXTURE_2D,
                 0,
@@ -193,6 +166,57 @@ impl Renderer {
                 SPECTRUM_BINS as i32,
                 1,
                 0,
+                glow::RED,
+                glow::FLOAT,
+                glow::PixelUnpackData::Slice(Some(bytemuck_cast(&empty_spectrum))),
+            );
+
+            gl.viewport(0, 0, width as i32, height as i32);
+
+            let loc = |name: &str| gl.get_uniform_location(program, name);
+            Ok(Renderer {
+                u_resolution: loc("iResolution"),
+                u_time: loc("iTime"),
+                u_rms: loc("iRMS"),
+                u_bass: loc("iBass"),
+                u_mid: loc("iMid"),
+                u_treble: loc("iTreble"),
+                u_spectrum: loc("iSpectrum"),
+                _backend: backend,
+                gl,
+                program,
+                vao,
+                framebuffer,
+                color_tex,
+                spectrum_tex,
+                width,
+                height,
+                pixels: vec![0u8; (width * height * 3) as usize],
+            })
+        }
+    }
+
+    /// Render one frame and return its rgb24 bytes (top-to-bottom).
+    pub fn render_frame(&mut self, time: f32, f: &Features) -> &[u8] {
+        let gl = &self.gl;
+        unsafe {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.framebuffer));
+            gl.viewport(0, 0, self.width as i32, self.height as i32);
+            gl.read_buffer(glow::COLOR_ATTACHMENT0);
+            gl.use_program(Some(self.program));
+            gl.bind_vertex_array(Some(self.vao));
+
+            // Upload spectrum as a 1D (Nx1) R32F texture on unit 0. Storage is
+            // allocated once in `new`; per-frame updates only replace contents.
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.spectrum_tex));
+            gl.tex_sub_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                0,
+                0,
+                SPECTRUM_BINS as i32,
+                1,
                 glow::RED,
                 glow::FLOAT,
                 glow::PixelUnpackData::Slice(Some(bytemuck_cast(&f.spectrum))),
@@ -240,11 +264,228 @@ impl Renderer {
     }
 }
 
+enum GlBackend {
+    #[cfg(target_os = "macos")]
+    NativeMac(macos_gl::NativeContext),
+    Egl(Box<EglBackend>),
+}
+
+impl GlBackend {
+    fn create(width: u32, height: u32) -> Result<Self> {
+        #[cfg(target_os = "macos")]
+        {
+            let requested = std::env::var("SPECTRAFORGE_RENDER_BACKEND")
+                .ok()
+                .map(|value| value.to_ascii_lowercase());
+
+            match requested.as_deref() {
+                Some("egl") | Some("mesa") => {
+                    return Ok(Self::Egl(Box::new(EglBackend::new(width, height)?)));
+                }
+                Some("cgl") | Some("macos") | Some("metal") | Some("native") => {
+                    return macos_gl::NativeContext::new().map(Self::NativeMac);
+                }
+                Some(other) => bail!(
+                    "unknown SPECTRAFORGE_RENDER_BACKEND={other}; expected native, metal, cgl, macos, egl, or mesa"
+                ),
+                None => {}
+            }
+
+            match macos_gl::NativeContext::new() {
+                Ok(context) => return Ok(Self::NativeMac(context)),
+                Err(error) => {
+                    eprintln!("native macOS OpenGL failed ({error:#}); falling back to Mesa EGL");
+                }
+            }
+        }
+
+        Ok(Self::Egl(Box::new(EglBackend::new(width, height)?)))
+    }
+
+    fn get_proc_address(&self, name: &str) -> *const c_void {
+        match self {
+            #[cfg(target_os = "macos")]
+            Self::NativeMac(context) => context.get_proc_address(name),
+            Self::Egl(context) => context.get_proc_address(name),
+        }
+    }
+
+    fn make_current(&self) -> Result<()> {
+        match self {
+            #[cfg(target_os = "macos")]
+            Self::NativeMac(context) => context.make_current(),
+            Self::Egl(context) => context.make_current(),
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            #[cfg(target_os = "macos")]
+            Self::NativeMac(_) => "macOS CGL/OpenGL (Metal-backed)",
+            Self::Egl(_) => "Mesa EGL/OpenGL",
+        }
+    }
+}
+
+struct EglBackend {
+    egl: egl::DynamicInstance<egl::EGL1_5>,
+    display: egl::Display,
+    context: egl::Context,
+    surface: egl::Surface,
+}
+
+impl EglBackend {
+    fn new(width: u32, height: u32) -> Result<Self> {
+        let egl = load_egl()?;
+        let display = initialize_display(&egl)?;
+
+        let config_attrs = [
+            egl::SURFACE_TYPE,
+            egl::PBUFFER_BIT,
+            egl::RENDERABLE_TYPE,
+            egl::OPENGL_BIT,
+            egl::RED_SIZE,
+            8,
+            egl::GREEN_SIZE,
+            8,
+            egl::BLUE_SIZE,
+            8,
+            egl::NONE,
+        ];
+        let config = egl
+            .choose_first_config(display, &config_attrs)
+            .context("eglChooseConfig failed")?
+            .context("no matching EGL config")?;
+
+        egl.bind_api(egl::OPENGL_API)
+            .context("eglBindAPI(OpenGL) failed")?;
+
+        let surface_attrs = [
+            egl::WIDTH,
+            width as i32,
+            egl::HEIGHT,
+            height as i32,
+            egl::NONE,
+        ];
+        let surface = egl
+            .create_pbuffer_surface(display, config, &surface_attrs)
+            .context("creating pbuffer surface")?;
+
+        let context_attrs = [
+            egl::CONTEXT_MAJOR_VERSION,
+            3,
+            egl::CONTEXT_MINOR_VERSION,
+            3,
+            egl::NONE,
+        ];
+        let context = egl
+            .create_context(display, config, None, &context_attrs)
+            .context("creating GL 3.3 context")?;
+
+        let backend = Self {
+            egl,
+            display,
+            context,
+            surface,
+        };
+        backend.make_current()?;
+        Ok(backend)
+    }
+
+    fn get_proc_address(&self, name: &str) -> *const c_void {
+        self.egl
+            .get_proc_address(name)
+            .map_or(std::ptr::null(), |proc| proc as *const c_void)
+    }
+
+    fn make_current(&self) -> Result<()> {
+        self.egl
+            .make_current(
+                self.display,
+                Some(self.surface),
+                Some(self.surface),
+                Some(self.context),
+            )
+            .context("eglMakeCurrent failed")
+    }
+}
+
+fn initialize_display(egl: &egl::DynamicInstance<egl::EGL1_5>) -> Result<egl::Display> {
+    let mut errors = Vec::new();
+
+    match unsafe { egl.get_display(egl::DEFAULT_DISPLAY) } {
+        Some(display) => match egl.initialize(display) {
+            Ok(_) => return Ok(display),
+            Err(error) => errors.push(format!("default display: {error}")),
+        },
+        None => errors.push("default display: no EGL display".to_string()),
+    }
+
+    match unsafe {
+        egl.get_platform_display(
+            EGL_PLATFORM_SURFACELESS_MESA,
+            egl::DEFAULT_DISPLAY,
+            &[egl::ATTRIB_NONE],
+        )
+    } {
+        Ok(display) => match egl.initialize(display) {
+            Ok(_) => return Ok(display),
+            Err(error) => errors.push(format!("surfaceless display: {error}")),
+        },
+        Err(error) => errors.push(format!("surfaceless display: {error}")),
+    }
+
+    bail!("eglInitialize failed; tried {}", errors.join("; "))
+}
+
+fn load_egl() -> Result<egl::DynamicInstance<egl::EGL1_5>> {
+    if let Ok(path) = std::env::var("SPECTRAFORGE_EGL_LIBRARY") {
+        return unsafe { egl::DynamicInstance::<egl::EGL1_5>::load_required_from_filename(&path) }
+            .map_err(|e| anyhow::anyhow!("loading EGL from SPECTRAFORGE_EGL_LIBRARY={path}: {e}"));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let candidates = [
+            "libEGL.dylib",
+            "/opt/homebrew/lib/libEGL.dylib",
+            "/opt/homebrew/opt/mesa/lib/libEGL.dylib",
+            "/usr/local/lib/libEGL.dylib",
+            "/usr/local/opt/mesa/lib/libEGL.dylib",
+        ];
+        let mut errors = Vec::new();
+
+        for candidate in candidates {
+            match unsafe {
+                egl::DynamicInstance::<egl::EGL1_5>::load_required_from_filename(candidate)
+            } {
+                Ok(egl) => return Ok(egl),
+                Err(error) => errors.push(format!("{candidate}: {error}")),
+            }
+        }
+
+        bail!(
+            "loading libEGL for macOS failed. Install Mesa with `brew install mesa`, \
+             or set SPECTRAFORGE_EGL_LIBRARY to the full libEGL.dylib path. Tried: {}",
+            errors.join("; ")
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    unsafe {
+        egl::DynamicInstance::<egl::EGL1_5>::load_required()
+            .map_err(|e| anyhow::anyhow!("loading libEGL: {e}"))
+    }
+}
+
 impl Drop for Renderer {
     fn drop(&mut self) {
+        let _ = self._backend.make_current();
         unsafe {
             self.gl.delete_program(self.program);
             self.gl.delete_vertex_array(self.vao);
+            self.gl.delete_framebuffer(self.framebuffer);
+            self.gl.delete_texture(self.color_tex);
             self.gl.delete_texture(self.spectrum_tex);
         }
     }
@@ -300,5 +541,217 @@ unsafe fn compile_program(gl: &glow::Context, user_shader: &str) -> Result<glow:
             bail!("shader link failed:\n{log}");
         }
         Ok(program)
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos_gl {
+    use anyhow::{Context, Result, bail};
+    use libloading::Library;
+    use std::ffi::{CStr, CString, c_char, c_int, c_void};
+    use std::ptr;
+
+    type CglContextObj = *mut c_void;
+    type CglPixelFormatObj = *mut c_void;
+    type CglPixelFormatAttribute = c_int;
+
+    type CglChoosePixelFormatFn = unsafe extern "C" fn(
+        *const CglPixelFormatAttribute,
+        *mut CglPixelFormatObj,
+        *mut c_int,
+    ) -> c_int;
+    type CglCreateContextFn =
+        unsafe extern "C" fn(CglPixelFormatObj, CglContextObj, *mut CglContextObj) -> c_int;
+    type CglDestroyPixelFormatFn = unsafe extern "C" fn(CglPixelFormatObj) -> c_int;
+    type CglSetCurrentContextFn = unsafe extern "C" fn(CglContextObj) -> c_int;
+    type CglDestroyContextFn = unsafe extern "C" fn(CglContextObj) -> c_int;
+    type CglErrorStringFn = unsafe extern "C" fn(c_int) -> *const c_char;
+
+    const CGL_PFA_COLOR_SIZE: CglPixelFormatAttribute = 8;
+    const CGL_PFA_ALPHA_SIZE: CglPixelFormatAttribute = 11;
+    const CGL_PFA_ACCELERATED: CglPixelFormatAttribute = 73;
+    const CGL_PFA_OPENGL_PROFILE: CglPixelFormatAttribute = 99;
+    const CGL_OGLP_VERSION_3_2_CORE: CglPixelFormatAttribute = 0x3200;
+    const CGL_OGLP_VERSION_GL4_CORE: CglPixelFormatAttribute = 0x4100;
+
+    pub struct NativeContext {
+        library: Library,
+        context: CglContextObj,
+        cgl_set_current_context: CglSetCurrentContextFn,
+        cgl_destroy_context: CglDestroyContextFn,
+        cgl_error_string: CglErrorStringFn,
+    }
+
+    impl NativeContext {
+        pub fn new() -> Result<Self> {
+            unsafe {
+                let library = Library::new("/System/Library/Frameworks/OpenGL.framework/OpenGL")
+                    .context("loading OpenGL.framework")?;
+
+                let cgl_choose_pixel_format =
+                    load_symbol::<CglChoosePixelFormatFn>(&library, b"CGLChoosePixelFormat\0")?;
+                let cgl_create_context =
+                    load_symbol::<CglCreateContextFn>(&library, b"CGLCreateContext\0")?;
+                let cgl_destroy_pixel_format =
+                    load_symbol::<CglDestroyPixelFormatFn>(&library, b"CGLDestroyPixelFormat\0")?;
+                let cgl_set_current_context =
+                    load_symbol::<CglSetCurrentContextFn>(&library, b"CGLSetCurrentContext\0")?;
+                let cgl_destroy_context =
+                    load_symbol::<CglDestroyContextFn>(&library, b"CGLDestroyContext\0")?;
+                let cgl_error_string =
+                    load_symbol::<CglErrorStringFn>(&library, b"CGLErrorString\0")?;
+
+                let pixel_format = choose_pixel_format(
+                    cgl_choose_pixel_format,
+                    cgl_error_string,
+                    &[
+                        &[
+                            CGL_PFA_ACCELERATED,
+                            CGL_PFA_OPENGL_PROFILE,
+                            CGL_OGLP_VERSION_GL4_CORE,
+                            CGL_PFA_COLOR_SIZE,
+                            24,
+                            CGL_PFA_ALPHA_SIZE,
+                            8,
+                            0,
+                        ],
+                        &[
+                            CGL_PFA_ACCELERATED,
+                            CGL_PFA_OPENGL_PROFILE,
+                            CGL_OGLP_VERSION_3_2_CORE,
+                            CGL_PFA_COLOR_SIZE,
+                            24,
+                            CGL_PFA_ALPHA_SIZE,
+                            8,
+                            0,
+                        ],
+                    ],
+                )?;
+
+                let mut context = ptr::null_mut();
+                let create_result = cgl_create_context(pixel_format, ptr::null_mut(), &mut context);
+                let destroy_pixel_format_result = cgl_destroy_pixel_format(pixel_format);
+                check_error(
+                    destroy_pixel_format_result,
+                    cgl_error_string,
+                    "CGLDestroyPixelFormat",
+                )?;
+                check_error(create_result, cgl_error_string, "CGLCreateContext")?;
+                if context.is_null() {
+                    bail!("CGLCreateContext returned a null context");
+                }
+
+                let native = Self {
+                    library,
+                    context,
+                    cgl_set_current_context,
+                    cgl_destroy_context,
+                    cgl_error_string,
+                };
+                native.make_current()?;
+                Ok(native)
+            }
+        }
+
+        pub fn get_proc_address(&self, name: &str) -> *const c_void {
+            let symbol_name = match CString::new(name) {
+                Ok(symbol_name) => symbol_name,
+                Err(_) => return ptr::null(),
+            };
+
+            unsafe {
+                self.library
+                    .get::<*const c_void>(symbol_name.as_bytes_with_nul())
+                    .map(|symbol| *symbol)
+                    .unwrap_or(ptr::null())
+            }
+        }
+
+        pub fn make_current(&self) -> Result<()> {
+            unsafe {
+                check_error(
+                    (self.cgl_set_current_context)(self.context),
+                    self.cgl_error_string,
+                    "CGLSetCurrentContext",
+                )
+            }
+        }
+    }
+
+    impl Drop for NativeContext {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = (self.cgl_set_current_context)(ptr::null_mut());
+                let _ = (self.cgl_destroy_context)(self.context);
+            }
+        }
+    }
+
+    unsafe fn load_symbol<T: Copy>(library: &Library, name: &[u8]) -> Result<T> {
+        unsafe {
+            library
+                .get::<T>(name)
+                .map(|symbol| *symbol)
+                .with_context(|| format!("loading {}", String::from_utf8_lossy(name)))
+        }
+    }
+
+    unsafe fn choose_pixel_format(
+        cgl_choose_pixel_format: CglChoosePixelFormatFn,
+        cgl_error_string: CglErrorStringFn,
+        attempts: &[&[CglPixelFormatAttribute]],
+    ) -> Result<CglPixelFormatObj> {
+        let mut errors = Vec::new();
+
+        for attribs in attempts {
+            let mut pixel_format = ptr::null_mut();
+            let mut pixel_format_count = 0;
+            let error = unsafe {
+                cgl_choose_pixel_format(
+                    attribs.as_ptr(),
+                    &mut pixel_format,
+                    &mut pixel_format_count,
+                )
+            };
+
+            if error == 0 && !pixel_format.is_null() && pixel_format_count > 0 {
+                return Ok(pixel_format);
+            }
+
+            errors.push(unsafe { cgl_error_message(error, cgl_error_string) });
+        }
+
+        bail!(
+            "CGLChoosePixelFormat returned no accelerated pixel formats; tried {}",
+            errors.join("; ")
+        )
+    }
+
+    unsafe fn check_error(
+        error: c_int,
+        cgl_error_string: CglErrorStringFn,
+        action: &str,
+    ) -> Result<()> {
+        if error == 0 {
+            return Ok(());
+        }
+
+        let message = unsafe { cgl_error_message(error, cgl_error_string) };
+        bail!("{action} failed: {message} ({error})")
+    }
+
+    unsafe fn cgl_error_message(error: c_int, cgl_error_string: CglErrorStringFn) -> String {
+        if error == 0 {
+            return "success".to_string();
+        }
+
+        let ptr = unsafe { cgl_error_string(error) };
+        if ptr.is_null() {
+            format!("CGL error {error}")
+        } else {
+            unsafe { CStr::from_ptr(ptr) }
+                .to_string_lossy()
+                .into_owned()
+        }
     }
 }

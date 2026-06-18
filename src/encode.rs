@@ -32,8 +32,16 @@ impl Encoder {
                 .arg(format!("subtitles={}", escape_filter_path(srt)));
         }
 
+        let video_codec = std::env::var("SPECTRAFORGE_VIDEO_CODEC")
+            .unwrap_or_else(|_| default_video_codec().to_string());
+        cmd.args(["-c:v", &video_codec, "-pix_fmt", "yuv420p"]);
+        if video_codec == "h264_videotoolbox" || video_codec == "hevc_videotoolbox" {
+            let bitrate = std::env::var("SPECTRAFORGE_VIDEO_BITRATE")
+                .unwrap_or_else(|_| default_video_bitrate(width, height));
+            cmd.args(["-b:v", &bitrate, "-allow_sw", "1"]);
+        }
+
         let child = cmd
-            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
             .args(["-c:a", "aac", "-shortest"])
             .arg(output)
             .stdin(Stdio::piped())
@@ -75,4 +83,24 @@ fn escape_filter_path(path: &Path) -> String {
         .replace(':', "\\:")
         .replace('\'', "\\'");
     format!("'{escaped}'")
+}
+
+fn default_video_codec() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "h264_videotoolbox"
+    } else {
+        "libx264"
+    }
+}
+
+fn default_video_bitrate(width: u32, height: u32) -> String {
+    let pixels = width as u64 * height as u64;
+    let mbps = if pixels <= 1280 * 720 {
+        8
+    } else if pixels <= 1920 * 1080 {
+        16
+    } else {
+        32
+    };
+    format!("{mbps}M")
 }

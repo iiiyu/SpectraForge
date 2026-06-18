@@ -37,7 +37,7 @@ running `cargo`:
 
 ```bash
 export DYLD_FALLBACK_LIBRARY_PATH="$(brew --prefix mesa)/lib:${DYLD_FALLBACK_LIBRARY_PATH:-}"
-cargo run --release -- --input song.mp3 --shader shaders/vis.glsl --output out.mp4
+cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4
 ```
 
 Or point SpectraForge directly at the EGL library:
@@ -52,8 +52,8 @@ startup. This keeps GLSL shader compatibility while using Apple's hardware path.
 Mesa EGL remains available as a fallback or for non-interactive environments:
 
 ```bash
-SPECTRAFORGE_RENDER_BACKEND=metal cargo run --release -- --input song.mp3 --shader shaders/vis.glsl --output out.mp4
-SPECTRAFORGE_RENDER_BACKEND=egl cargo run --release -- --input song.mp3 --shader shaders/vis.glsl --output out.mp4
+SPECTRAFORGE_RENDER_BACKEND=metal cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4
+SPECTRAFORGE_RENDER_BACKEND=egl cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4
 ```
 
 This is a Metal-backed OpenGL path, not a direct Metal Shading Language backend.
@@ -64,8 +64,8 @@ macOS also defaults to FFmpeg's hardware H.264 encoder (`h264_videotoolbox`).
 Override the encoder or bitrate if needed:
 
 ```bash
-SPECTRAFORGE_VIDEO_CODEC=libx264 cargo run --release -- --input song.mp3 --shader shaders/vis.glsl --output out.mp4
-SPECTRAFORGE_VIDEO_BITRATE=24M cargo run --release -- --input song.mp3 --shader shaders/vis.glsl --output out.mp4
+SPECTRAFORGE_VIDEO_CODEC=libx264 cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4
+SPECTRAFORGE_VIDEO_BITRATE=24M cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4
 ```
 
 To keep that setting for future zsh sessions:
@@ -92,7 +92,7 @@ uv tool update-shell
 When you want lyrics, run SpectraForge from a shell where `whisper` is available:
 
 ```bash
-cargo run --release -- --input song.mp3 --shader shaders/vis.glsl --output out.mp4 --lyrics
+cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4 --lyrics
 ```
 
 ### Linux / WSL2
@@ -109,16 +109,16 @@ but is slower than hardware rendering.
 ## Usage
 
 ```bash
-cargo run --release -- --input song.mp3 --shader shaders/vis.glsl --output out.mp4 \
+cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4 \
     [--width 1280] [--height 720] [--fps 30]
 
-cargo run --release -- --input song.mp3 --shader shaders/vis.glsl --output out.mp4 --width 1920 --height 1080 --fps 30
+cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4 --width 1920 --height 1080 --fps 30
 
 # Use the MP3 only for duration/output audio; shader audio uniforms stay silent:
-cargo run --release -- --input song.mp3 --shader shaders/rover_seasons_loop.glsl --output out.mp4 --duration-only
+cargo run --release -- --input song.mp3 --shader shaders/without_audio/rover_seasons_loop.glsl --output out.mp4 --duration-only
 
 # Inspect audio features without rendering:
-cargo run -- --input song.mp3 --shader shaders/vis.glsl --output x.mp4 --dump-features
+cargo run -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output x.mp4 --dump-features
 ```
 
 Rendered videos include the input MP3 audio track. `--duration-only` only turns
@@ -129,11 +129,11 @@ off audio-reactive shader features; it does not mute or remove the output audio.
 Transcribe the song with whisper and burn the lyrics into the video:
 
 ```bash
-cargo run --release -- --input song.mp3 --shader shaders/vis.glsl --output out.mp4 \
+cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4 \
     --lyrics [--whisper-model medium] [--whisper-cmd whisper]
 
 # Or supply your own subtitle file (skips transcription):
-cargo run --release -- --input song.mp3 --shader shaders/vis.glsl --output out.mp4 \
+cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4 \
     --subtitles song.srt
 ```
 
@@ -152,19 +152,19 @@ cue-like phrases with more than 3 words but less than 0.5s of source timing are
 dropped before rendering.
 
 ```bash
-cargo run --release -- --input song.mp3 --shader shaders/rover_seasons_loop.glsl --output out.mp4 \
+cargo run --release -- --input song.mp3 --shader shaders/without_audio/rover_seasons_loop.glsl --output out.mp4 \
     --lyrics \
     --subtitle-font "Arial Rounded MT Bold" \
     --subtitle-font-size 72
 
 # Use fonts from a custom font directory:
-cargo run --release -- --input song.mp3 --shader shaders/vis.glsl --output out.mp4 \
+cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4 \
     --subtitles song.json \
     --subtitle-font "My Display Font" \
     --subtitle-fonts-dir ./fonts
 
 # Keep the old plain subtitle renderer:
-cargo run --release -- --input song.mp3 --shader shaders/vis.glsl --output out.mp4 \
+cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4 \
     --lyrics --subtitle-style plain
 ```
 
@@ -180,5 +180,12 @@ Shadertoy-style: define `mainImage`. These uniforms are injected automatically:
 | `iBass` `iMid` `iTreble` | `float`     | band energies (20–250 / 250–4k / 4k–20k Hz)           |
 | `iSpectrum`              | `sampler2D` | 64×1 texture; sample `.r` for a log-spaced bin (0..1) |
 
-Example shaders live under `shaders/`. See `shaders/vis.glsl` for a working
-example.
+Example shaders live under `shaders/`, split into two folders:
+
+- `shaders/with_audio/` — react to the audio uniforms above. Drive them with a
+  normal render (no `--duration-only`).
+- `shaders/without_audio/` — animate on `iTime` alone; the audio uniforms and
+  `iSpectrum` are synthesized internally, so the result is identical for any
+  input. Pair with `--duration-only` (the MP3 is still muxed as the sound track).
+
+See `shaders/with_audio/vis.glsl` for a working example.

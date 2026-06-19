@@ -70,7 +70,13 @@ struct TimedWord {
 pub enum OverlayStyle {
     Plain,
     Mv,
+    /// Centered title shown for the first few seconds, then fades out.
+    Title,
 }
+
+const TITLE_HOLD_MS: u64 = 3000;
+const TITLE_FADE_IN_MS: u64 = 400;
+const TITLE_FADE_OUT_MS: u64 = 700;
 
 pub struct LyricOverlay {
     cues: Vec<SubtitleCue>,
@@ -137,6 +143,33 @@ impl LyricOverlay {
         })
     }
 
+    /// Build an overlay that shows `text` as a centered title that fades out
+    /// after the first few seconds (hold + fade-out window).
+    pub fn title(
+        text: &str,
+        width: u32,
+        height: u32,
+        font_name: &str,
+        requested_font_size: u32,
+        fonts_dir: Option<&Path>,
+    ) -> Result<Self> {
+        let font_size = effective_font_size(height, requested_font_size);
+        let font = load_font(font_name, fonts_dir)?;
+        Ok(Self {
+            cues: vec![SubtitleCue {
+                start_ms: 0,
+                end_ms: TITLE_HOLD_MS + TITLE_FADE_OUT_MS,
+                text: text.to_string(),
+                words: Vec::new(),
+            }],
+            font,
+            width,
+            height,
+            font_size,
+            style: OverlayStyle::Title,
+        })
+    }
+
     pub fn draw(&self, frame: &mut [u8], time_seconds: f32) {
         let time_ms = (time_seconds.max(0.0) * 1000.0).round() as u64;
         let Some(cue) = self
@@ -151,7 +184,21 @@ impl LyricOverlay {
         match self.style {
             OverlayStyle::Plain => self.draw_plain(frame, cue),
             OverlayStyle::Mv => self.draw_mv(frame, cue, time_ms),
+            OverlayStyle::Title => self.draw_title(frame, cue, time_ms),
         }
+    }
+
+    fn draw_title(&self, frame: &mut [u8], cue: &SubtitleCue, time_ms: u64) {
+        let alpha = if time_ms < TITLE_FADE_IN_MS {
+            time_ms as f32 / TITLE_FADE_IN_MS as f32
+        } else if time_ms < TITLE_HOLD_MS {
+            1.0
+        } else {
+            1.0 - (time_ms - TITLE_HOLD_MS) as f32 / TITLE_FADE_OUT_MS as f32
+        };
+        let scale = self.font_size as f32 * 1.25;
+        let lines = layout_words(&cue.text, self.width, scale.round() as u32, 2);
+        self.draw_lines(frame, &lines, scale, self.height as f32 * 0.5, alpha, None);
     }
 
     fn draw_plain(&self, frame: &mut [u8], cue: &SubtitleCue) {

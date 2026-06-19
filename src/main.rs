@@ -73,6 +73,10 @@ struct Args {
     #[arg(long)]
     subtitle_fonts_dir: Option<PathBuf>,
 
+    /// Show a title (first 3s, then fades out). Defaults to the MP3 file name; pass text to override.
+    #[arg(long, num_args = 0..=1, default_missing_value = "")]
+    title: Option<String>,
+
     /// Use input audio only for output duration/audio; do not drive shader features from it
     #[arg(long)]
     duration_only: bool,
@@ -155,6 +159,32 @@ fn main() -> Result<()> {
         None => None,
     };
 
+    let title_overlay = match &args.title {
+        Some(text) => {
+            let text = if text.is_empty() {
+                args.input
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string()
+            } else {
+                text.clone()
+            };
+            Some(
+                lyrics::LyricOverlay::title(
+                    &text,
+                    args.width,
+                    args.height,
+                    &args.subtitle_font,
+                    args.subtitle_font_size,
+                    args.subtitle_fonts_dir.as_deref(),
+                )
+                .context("preparing title overlay")?,
+            )
+        }
+        None => None,
+    };
+
     let shader_src = std::fs::read_to_string(&args.shader)
         .with_context(|| format!("reading shader {}", args.shader.display()))?;
 
@@ -174,10 +204,13 @@ fn main() -> Result<()> {
         } else {
             renderer.render_frame(t, &silent_features)
         };
-        if let Some(lyric_overlay) = &lyric_overlay {
+        let overlays = [lyric_overlay.as_ref(), title_overlay.as_ref()];
+        if overlays.iter().any(Option::is_some) {
             composited_frame.clear();
             composited_frame.extend_from_slice(frame);
-            lyric_overlay.draw(&mut composited_frame, t);
+            for overlay in overlays.into_iter().flatten() {
+                overlay.draw(&mut composited_frame, t);
+            }
             encoder.write_frame(&composited_frame)?;
         } else {
             encoder.write_frame(frame)?;

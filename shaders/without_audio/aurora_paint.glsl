@@ -1,39 +1,11 @@
-// SpectraForge audio-free variant.
+// Aurora Paint (audio-free) for SpectraForge.
 //
-// Identical visuals to the with_audio version, but the former audio uniforms
-// (iBass/iMid/iTreble/iRMS) and the iSpectrum texture are synthesized from
-// iTime so the shader animates on its own — no input track drives it.
-// Render any input with this shader; audio (if any) is only muxed for sound.
-float sfPulse(float speed, float base, float amp) {
-    return base + amp * (0.5 + 0.5 * sin(iTime * speed));
-}
-#define iBass   sfPulse(2.40, 0.10, 0.18)
-#define iMid    sfPulse(1.70, 0.10, 0.22)
-#define iTreble sfPulse(3.10, 0.04, 0.18)
-#define iRMS    sfPulse(2.00, 0.10, 0.16)
-// Bass-heavy, gently churning fake spectrum in normalized freq x (0..1).
-float sfSpectrum(float x) {
-    x = clamp(x, 0.0, 1.0);
-    float env = exp(-x * 2.5);
-    float wob = 0.5 + 0.5 * sin(iTime * (2.0 + x * 8.0) + x * 20.0);
-    return clamp(env * (0.35 + 0.65 * wob), 0.0, 1.0);
-}
-// Every texture() call in these shaders samples iSpectrum along x; reroute them.
-#define texture(tex, uv) vec4(sfSpectrum((uv).x))
-
-// Aurora Paint for SpectraForge.
-//
-// Based on "Aurora Paint" by Noztol.
-// Adapted to SpectraForge's mainImage entry point and audio uniforms.
+// By Noztol. Adapted to SpectraForge's Shadertoy-style mainImage entry point
+// (u_time -> iTime, u_resolution -> iResolution). Animates on iTime alone, so
+// it renders identically for any input; pair with --duration-only.
 
 const float pi = 3.14159;
 const float pi2 = pi * 2.;
-
-// Audio-reactive globals, set once at the top of mainImage so the helper
-// functions (which take no audio args) can read them.
-float aBass;    // low-end energy: aurora brightness + sway
-float aMid;     // mids: wind sway on trees
-float aTreble;  // highs: blotch-star twinkle
 
 float opU( float d1, float d2 ){ return min(d1,d2); }
 float opS( float d2, float d1 ){ return max(-d1,d2); }
@@ -101,8 +73,8 @@ float sdTri(vec2 p, float bottom, float top, float halfWidth) {
 
 float sdTree(vec2 p, vec2 pos, float scale) {
     vec2 q = (p - pos) / scale;
-    // Wind sway, driven by the mids.
-    q.x -= sin(iTime * 1.5 + pos.x * 10.0) * (0.02 + aMid * 0.04) * max(0.0, q.y);
+    // Slight wind sway
+    q.x -= sin(iTime * 1.5 + pos.x * 10.0) * 0.02 * max(0.0, q.y);
 
     // Trunk
     float d = max(abs(q.x) - 0.03, max(-q.y, q.y - 0.2));
@@ -117,16 +89,21 @@ float sdTree(vec2 p, vec2 pos, float scale) {
 
 // Solid sloping landmasses framing the center
 float getLand(vec2 uv, float aspect) {
+    // Left shore sloping down
     float leftShore = 0.45 * exp(-0.5 * pow(uv.x, 2.0));
+    // Right shore sloping down
     float rightShore = 0.45 * exp(-0.5 * pow(uv.x - aspect, 2.0));
 
     float terrainHeight = max(leftShore, rightShore);
+
+    // Add tiny bit of noise to the ground for texture
     terrainHeight += (noise01(uv * vec2(20.0, 1.0)) * 0.015);
 
+    // Distance field is just the Y coordinate minus the terrain height
     return uv.y - terrainHeight;
 }
 
-// Trees planted along the slopes
+// Trees planted along the new slopes
 float getTrees(vec2 uv, float aspect) {
     float d = 1.0;
     // Left shore trees
@@ -154,6 +131,7 @@ vec3 colorBrushStroke(vec2 uvLine, vec2 uvPaper, vec2 lineSize, float sdGeometry
     float posInLineY = (uvLine.y / lineSize.y);
 
     if(posInLineY > 0.) {
+        // Use a sine wave mapped to [0, 1] for smooth, continuous up-and-down pulsing
         float smoothWave = 0.5 + 0.5 * sin(iTime * 1.5);
         float autoX = mix(0.15, 0.7, smoothWave);
         posInLineY = pow(posInLineY, (pow(autoX,2.) * 15.) + 1.5);
@@ -210,20 +188,15 @@ vec2 getuv_centerX(vec2 fragCoord, vec2 newTL, vec2 newSize)
     return ret + vec2(newTL.x - (newWidth - newSize.x) / 2.0, newTL.y);
 }
 
-void mainImage(out vec4 fragColor, in vec2 fragCoord) {
-    aBass   = iBass;
-    aMid    = iMid;
-    aTreble = iTreble;
-
-    vec2 uv = getuv_centerX(fragCoord, vec2(-1,-1), vec2(2,2)); // Auroras (-1 to 1)
-    vec2 landscapeUV = fragCoord / iResolution.y;               // Landscape SDFs (0 to Aspect)
+void mainImage(out vec4 fragColor, in vec2 fragCoord)
+{
+    vec2 uv = getuv_centerX(fragCoord, vec2(-1,-1), vec2(2,2)); // Used for Auroras (-1 to 1)
+    vec2 landscapeUV = fragCoord / iResolution.y;               // Used for Landscape SDFs (0 to Aspect)
     float aspect = iResolution.x / iResolution.y;
 
     float t = iTime * 0.4;
 
-    // Aurora brightness/alpha boost driven by the bass.
-    float glow = 1.0 + aBass * 1.2;
-
+    // Define the exact water surface level
     float waterLevelLandscape = 0.34;
     float waterLevelUV = waterLevelLandscape * 2.0 - 1.0;
     bool isWater = landscapeUV.y < waterLevelLandscape;
@@ -232,25 +205,24 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec3 col = skyColor;
     if (isWater) {
         vec3 waterBase = vec3(0.06, 0.18, 0.28);
-        col = mix(col, waterBase, 0.85);
+        col = mix(col, waterBase, 0.85); // Darken for water depth
     }
 
     if (!isWater) {
-        // 1. Paint Blotch Stars — twinkle with the treble.
-        float blotchAmt = smoothstep(12.0, 25.0, magicBox((uv+12.0)*8.0));
+        // 1. Paint Blotch Stars
+        float blotchAmt = smoothstep(12.0, 25.0, magicBox((uv+12.0)*8.0)); // UV scaled by 8.0 for smaller paint flicks
         blotchAmt = pow(blotchAmt, 1.5);
-        col += vec3(0.6, 0.85, 0.95) * blotchAmt * (0.6 + aTreble * 0.9) * (0.5 + 0.5 * sin(iTime*1.5 + uv.x*5.0));
+        col += vec3(0.6, 0.85, 0.95) * blotchAmt * 0.6 * (0.5 + 0.5 * sin(iTime*1.5 + uv.x*5.0));
 
-        // 2. Aurora — sway amplitude grows slightly with the bass.
-        float sway = 1.0 + aBass * 0.4;
-        vec2 aUV1 = uv; aUV1.y += (sin(aUV1.x * 2.0 + 1.0 + t) * 0.35 + sin(aUV1.x * 4.0 - t*1.5) * 0.1) * sway;
-        vec2 aUV2 = uv; aUV2.y += (cos(aUV2.x * 2.5 - 0.5 - t*0.8) * 0.4 + sin(aUV2.x * 1.5 + t*1.2) * 0.2) * sway;
-        vec2 aUV3 = uv; aUV3.y += sin(aUV3.x * 1.8 + 2.0 + t*0.5) * 0.35 * sway;
+        // 2.Aurora
+        vec2 aUV1 = uv; aUV1.y += sin(aUV1.x * 2.0 + 1.0 + t) * 0.35 + sin(aUV1.x * 4.0 - t*1.5) * 0.1;
+        vec2 aUV2 = uv; aUV2.y += cos(aUV2.x * 2.5 - 0.5 - t*0.8) * 0.4 + sin(aUV2.x * 1.5 + t*1.2) * 0.2;
+        vec2 aUV3 = uv; aUV3.y += sin(aUV3.x * 1.8 + 2.0 + t*0.5) * 0.35;
 
-        col = colorBrushStrokeLine(aUV3, col, vec4(vec3(0.1, 0.8, 0.5)*glow, 0.6), vec2(-2.5, 0.6), vec2(2.5, 0.6), 0.4);
-        col = colorBrushStrokeLine(aUV1, col, vec4(vec3(0.3, 0.9, 0.7)*glow, 0.8), vec2(-2.5, 0.4), vec2(2.5, 0.4), 0.3);
-        col = colorBrushStrokeLine(aUV2, col, vec4(vec3(0.0, 0.6, 0.5)*glow, 0.9), vec2(2.5, 0.2), vec2(-2.5, 0.2), 0.25);
-        col = colorBrushStrokeLine(aUV1, col, vec4(vec3(0.6, 1.0, 0.8)*glow, 0.9), vec2(-2.5, 0.3), vec2(2.5, 0.3), 0.15);
+        col = colorBrushStrokeLine(aUV3, col, vec4(0.1, 0.8, 0.5, 0.6), vec2(-2.5, 0.6), vec2(2.5, 0.6), 0.4);
+        col = colorBrushStrokeLine(aUV1, col, vec4(0.3, 0.9, 0.7, 0.8), vec2(-2.5, 0.4), vec2(2.5, 0.4), 0.3);
+        col = colorBrushStrokeLine(aUV2, col, vec4(0.0, 0.6, 0.5, 0.9), vec2(2.5, 0.2), vec2(-2.5, 0.2), 0.25);
+        col = colorBrushStrokeLine(aUV1, col, vec4(0.6, 1.0, 0.8, 0.9), vec2(-2.5, 0.3), vec2(2.5, 0.3), 0.15);
 
     } else {
         // 3. Aurora reflections
@@ -264,10 +236,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         vec2 rUV2 = refUV; rUV2.y += cos(rUV2.x * 2.5 - 0.5 - t*0.8) * 0.4 + sin(rUV2.x * 1.5 + t*1.2) * 0.2;
         vec2 rUV3 = refUV; rUV3.y += sin(rUV3.x * 1.8 + 2.0 + t*0.5) * 0.35;
 
-        col = colorBrushStrokeLine(rUV3, col, vec4(vec3(0.1, 0.7, 0.5)*glow, 0.3), vec2(-2.5, 0.6), vec2(2.5, 0.6), 0.4);
-        col = colorBrushStrokeLine(rUV1, col, vec4(vec3(0.2, 0.8, 0.6)*glow, 0.4), vec2(-2.5, 0.4), vec2(2.5, 0.4), 0.3);
-        col = colorBrushStrokeLine(rUV2, col, vec4(vec3(0.0, 0.5, 0.4)*glow, 0.45), vec2(2.5, 0.2), vec2(-2.5, 0.2), 0.25);
-        col = colorBrushStrokeLine(rUV1, col, vec4(vec3(0.4, 0.8, 0.7)*glow, 0.35), vec2(-2.5, 0.3), vec2(2.5, 0.3), 0.15);
+        col = colorBrushStrokeLine(rUV3, col, vec4(0.1, 0.7, 0.5, 0.3), vec2(-2.5, 0.6), vec2(2.5, 0.6), 0.4);
+        col = colorBrushStrokeLine(rUV1, col, vec4(0.2, 0.8, 0.6, 0.4), vec2(-2.5, 0.4), vec2(2.5, 0.4), 0.3);
+        col = colorBrushStrokeLine(rUV2, col, vec4(0.0, 0.5, 0.4, 0.45), vec2(2.5, 0.2), vec2(-2.5, 0.2), 0.25);
+        col = colorBrushStrokeLine(rUV1, col, vec4(0.4, 0.8, 0.7, 0.35), vec2(-2.5, 0.3), vec2(2.5, 0.3), 0.15);
     }
 
     // 4. Island Silhouettes
@@ -275,6 +247,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         float sceneDist = min(getLand(landscapeUV, aspect), getTrees(landscapeUV, aspect));
         col = mix(col, vec3(0.02, 0.04, 0.08), smoothstep(0.005, 0.0, sceneDist));
     } else {
+        // Fold landscape UV for exact island reflections
         float depthLandscape = waterLevelLandscape - landscapeUV.y;
         vec2 refLandUV = landscapeUV;
         refLandUV.y = waterLevelLandscape + depthLandscape;
@@ -283,6 +256,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         float refSceneDist = min(getLand(refLandUV, aspect), getTrees(refLandUV, aspect));
         col = mix(col, mix(col, vec3(0.02, 0.04, 0.08), 0.8), smoothstep(0.005, 0.0, refSceneDist));
 
+        // Add localized horizontal brush strokes for surface water texture
         vec2 surfaceUV = uv;
         surfaceUV.x += iTime * 0.05;
         col = colorBrushStrokeLine(surfaceUV, col, vec4(0.3, 0.8, 0.6, 0.15), vec2(2.5, waterLevelUV - 0.1), vec2(-2.5, waterLevelUV - 0.1), 0.08);

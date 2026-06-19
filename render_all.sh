@@ -13,6 +13,10 @@ cargo build --release
 for shader in shaders/without_audio/*.glsl; do
     name=$(basename "$shader" .glsl)
     out="$outdir/${name}.mp4"
+    if [ -s "$out" ]; then
+        echo "skip $out (exists)"
+        continue
+    fi
     echo "==> $out"
     # These shaders animate on time alone; --duration-only skips audio analysis.
     ./target/release/SpectraForge --input "$input" --shader "$shader" --output "$out" --duration-only

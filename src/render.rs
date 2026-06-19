@@ -4,22 +4,28 @@ use glow::HasContext;
 use khronos_egl as egl;
 use std::ffi::c_void;
 
-/// Headless OpenGL renderer: an off-screen framebuffer drawing a fullscreen
-/// quad with the user's fragment shader.
+/// Headless OpenGL renderer: off-screen framebuffers drawing a fullscreen quad
+/// with the user's fragment shader(s). A shader file may declare multiple
+/// passes (see `split_passes`); each renders to its own texture and later
+/// passes sample earlier ones via `iPass1`, `iPass2`, … The final pass is the
+/// image read out to the encoder.
 pub struct Renderer {
     // The backend context must stay alive while GL objects exist.
     _backend: GlBackend,
 
     gl: glow::Context,
-    program: glow::Program,
+    passes: Vec<Pass>,
+    // One render target per pass, in order. targets[i] is pass i's output.
+    targets: Vec<(glow::Framebuffer, glow::Texture)>,
     vao: glow::VertexArray,
-    framebuffer: glow::Framebuffer,
-    color_tex: glow::Texture,
     spectrum_tex: glow::Texture,
     width: u32,
     height: u32,
     pixels: Vec<u8>,
+}
 
+struct Pass {
+    program: glow::Program,
     u_resolution: Option<glow::UniformLocation>,
     u_time: Option<glow::UniformLocation>,
     u_rms: Option<glow::UniformLocation>,
@@ -27,6 +33,8 @@ pub struct Renderer {
     u_mid: Option<glow::UniformLocation>,
     u_treble: Option<glow::UniformLocation>,
     u_spectrum: Option<glow::UniformLocation>,
+    // iPass1.. locations; index j is iPass{j+1}, referring to targets[j].
+    u_pass: Vec<Option<glow::UniformLocation>>,
 }
 
 const VERTEX_SHADER: &str = r#"#version 330 core
@@ -44,6 +52,23 @@ uniform float iMid;
 uniform float iTreble;
 uniform sampler2D iSpectrum;
 "#;
+
+/// Splits a shader source into ordered passes. Passes are separated by a line
+/// whose trimmed content starts with `//---pass` (e.g. `//---pass---`). A file
+/// with no such marker is a single pass, identical to the old behavior.
+fn split_passes(src: &str) -> Vec<String> {
+    let mut passes = vec![String::new()];
+    for line in src.lines() {
+        if line.trim_start().starts_with("//---pass") {
+            passes.push(String::new());
+        } else {
+            let cur = passes.last_mut().unwrap();
+            cur.push_str(line);
+            cur.push('\n');
+        }
+    }
+    passes
+}
 
 const FRAG_MAIN: &str = r#"
 void main() {
@@ -74,63 +99,75 @@ impl Renderer {
             gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
             gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
 
-            let program = compile_program(&gl, user_shader)?;
+            let sources = split_passes(user_shader);
+            let pass_count = sources.len();
             let vao = gl
                 .create_vertex_array()
                 .map_err(|e| anyhow::anyhow!("VAO: {e}"))?;
 
-            let framebuffer = gl
-                .create_framebuffer()
-                .map_err(|e| anyhow::anyhow!("framebuffer: {e}"))?;
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+            // One RGBA8 render target per pass.
+            let mut targets = Vec::with_capacity(pass_count);
+            for _ in 0..pass_count {
+                let framebuffer = gl
+                    .create_framebuffer()
+                    .map_err(|e| anyhow::anyhow!("framebuffer: {e}"))?;
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
 
-            let color_tex = gl
-                .create_texture()
-                .map_err(|e| anyhow::anyhow!("color texture: {e}"))?;
-            gl.bind_texture(glow::TEXTURE_2D, Some(color_tex));
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MIN_FILTER,
-                glow::LINEAR as i32,
-            );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MAG_FILTER,
-                glow::LINEAR as i32,
-            );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_S,
-                glow::CLAMP_TO_EDGE as i32,
-            );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_T,
-                glow::CLAMP_TO_EDGE as i32,
-            );
-            gl.tex_image_2d(
-                glow::TEXTURE_2D,
-                0,
-                glow::RGBA8 as i32,
-                width as i32,
-                height as i32,
-                0,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(None),
-            );
-            gl.framebuffer_texture_2d(
-                glow::FRAMEBUFFER,
-                glow::COLOR_ATTACHMENT0,
-                glow::TEXTURE_2D,
-                Some(color_tex),
-                0,
-            );
-            gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
-            gl.read_buffer(glow::COLOR_ATTACHMENT0);
-            let framebuffer_status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
-            if framebuffer_status != glow::FRAMEBUFFER_COMPLETE {
-                bail!("off-screen framebuffer incomplete: 0x{framebuffer_status:x}");
+                let color_tex = gl
+                    .create_texture()
+                    .map_err(|e| anyhow::anyhow!("color texture: {e}"))?;
+                gl.bind_texture(glow::TEXTURE_2D, Some(color_tex));
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+                gl.tex_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    glow::RGBA8 as i32,
+                    width as i32,
+                    height as i32,
+                    0,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(None),
+                );
+                gl.framebuffer_texture_2d(
+                    glow::FRAMEBUFFER,
+                    glow::COLOR_ATTACHMENT0,
+                    glow::TEXTURE_2D,
+                    Some(color_tex),
+                    0,
+                );
+                gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+                gl.read_buffer(glow::COLOR_ATTACHMENT0);
+                let framebuffer_status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
+                if framebuffer_status != glow::FRAMEBUFFER_COMPLETE {
+                    bail!("off-screen framebuffer incomplete: 0x{framebuffer_status:x}");
+                }
+                targets.push((framebuffer, color_tex));
+            }
+
+            // Compile one program per pass. iPass1.. are declared up to
+            // pass_count so any pass may sample any earlier pass.
+            let mut passes = Vec::with_capacity(pass_count);
+            for src in &sources {
+                let program = compile_program(&gl, src, pass_count)?;
+                let loc = |name: &str| gl.get_uniform_location(program, name);
+                let u_pass = (0..pass_count)
+                    .map(|j| loc(&format!("iPass{}", j + 1)))
+                    .collect();
+                passes.push(Pass {
+                    u_resolution: loc("iResolution"),
+                    u_time: loc("iTime"),
+                    u_rms: loc("iRMS"),
+                    u_bass: loc("iBass"),
+                    u_mid: loc("iMid"),
+                    u_treble: loc("iTreble"),
+                    u_spectrum: loc("iSpectrum"),
+                    u_pass,
+                    program,
+                });
             }
 
             let spectrum_tex = gl
@@ -173,21 +210,12 @@ impl Renderer {
 
             gl.viewport(0, 0, width as i32, height as i32);
 
-            let loc = |name: &str| gl.get_uniform_location(program, name);
             Ok(Renderer {
-                u_resolution: loc("iResolution"),
-                u_time: loc("iTime"),
-                u_rms: loc("iRMS"),
-                u_bass: loc("iBass"),
-                u_mid: loc("iMid"),
-                u_treble: loc("iTreble"),
-                u_spectrum: loc("iSpectrum"),
                 _backend: backend,
                 gl,
-                program,
+                passes,
+                targets,
                 vao,
-                framebuffer,
-                color_tex,
                 spectrum_tex,
                 width,
                 height,
@@ -200,10 +228,6 @@ impl Renderer {
     pub fn render_frame(&mut self, time: f32, f: &Features) -> &[u8] {
         let gl = &self.gl;
         unsafe {
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.framebuffer));
-            gl.viewport(0, 0, self.width as i32, self.height as i32);
-            gl.read_buffer(glow::COLOR_ATTACHMENT0);
-            gl.use_program(Some(self.program));
             gl.bind_vertex_array(Some(self.vao));
 
             // Upload spectrum as a 1D (Nx1) R32F texture on unit 0. Storage is
@@ -222,32 +246,55 @@ impl Renderer {
                 glow::PixelUnpackData::Slice(Some(bytemuck_cast(&f.spectrum))),
             );
 
-            if let Some(l) = &self.u_resolution {
-                gl.uniform_2_f32(Some(l), self.width as f32, self.height as f32);
-            }
-            if let Some(l) = &self.u_time {
-                gl.uniform_1_f32(Some(l), time);
-            }
-            if let Some(l) = &self.u_rms {
-                gl.uniform_1_f32(Some(l), f.rms);
-            }
-            if let Some(l) = &self.u_bass {
-                gl.uniform_1_f32(Some(l), f.bass);
-            }
-            if let Some(l) = &self.u_mid {
-                gl.uniform_1_f32(Some(l), f.mid);
-            }
-            if let Some(l) = &self.u_treble {
-                gl.uniform_1_f32(Some(l), f.treble);
-            }
-            if let Some(l) = &self.u_spectrum {
-                gl.uniform_1_i32(Some(l), 0);
+            // Run each pass in order into its own target. Texture units:
+            // 0 = spectrum, 1+j = targets[j] (iPass{j+1}).
+            for (i, pass) in self.passes.iter().enumerate() {
+                let (framebuffer, _) = self.targets[i];
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+                gl.viewport(0, 0, self.width as i32, self.height as i32);
+                gl.read_buffer(glow::COLOR_ATTACHMENT0);
+                gl.use_program(Some(pass.program));
+
+                if let Some(l) = &pass.u_resolution {
+                    gl.uniform_2_f32(Some(l), self.width as f32, self.height as f32);
+                }
+                if let Some(l) = &pass.u_time {
+                    gl.uniform_1_f32(Some(l), time);
+                }
+                if let Some(l) = &pass.u_rms {
+                    gl.uniform_1_f32(Some(l), f.rms);
+                }
+                if let Some(l) = &pass.u_bass {
+                    gl.uniform_1_f32(Some(l), f.bass);
+                }
+                if let Some(l) = &pass.u_mid {
+                    gl.uniform_1_f32(Some(l), f.mid);
+                }
+                if let Some(l) = &pass.u_treble {
+                    gl.uniform_1_f32(Some(l), f.treble);
+                }
+                if let Some(l) = &pass.u_spectrum {
+                    gl.uniform_1_i32(Some(l), 0);
+                }
+                // Bind earlier passes' outputs. A pass sampling its own or a
+                // later pass reads last frame's (or initially black) contents.
+                for (j, loc) in pass.u_pass.iter().enumerate() {
+                    gl.active_texture(glow::TEXTURE1 + j as u32);
+                    gl.bind_texture(glow::TEXTURE_2D, Some(self.targets[j].1));
+                    if let Some(l) = loc {
+                        gl.uniform_1_i32(Some(l), 1 + j as i32);
+                    }
+                }
+
+                gl.clear_color(0.0, 0.0, 0.0, 1.0);
+                gl.clear(glow::COLOR_BUFFER_BIT);
+                gl.draw_arrays(glow::TRIANGLES, 0, 3);
             }
 
-            gl.clear_color(0.0, 0.0, 0.0, 1.0);
-            gl.clear(glow::COLOR_BUFFER_BIT);
-            gl.draw_arrays(glow::TRIANGLES, 0, 3);
-
+            // Read out the final pass's target.
+            let (final_fb, _) = self.targets[self.passes.len() - 1];
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(final_fb));
+            gl.read_buffer(glow::COLOR_ATTACHMENT0);
             gl.read_pixels(
                 0,
                 0,
@@ -482,10 +529,14 @@ impl Drop for Renderer {
     fn drop(&mut self) {
         let _ = self._backend.make_current();
         unsafe {
-            self.gl.delete_program(self.program);
+            for pass in &self.passes {
+                self.gl.delete_program(pass.program);
+            }
             self.gl.delete_vertex_array(self.vao);
-            self.gl.delete_framebuffer(self.framebuffer);
-            self.gl.delete_texture(self.color_tex);
+            for (framebuffer, color_tex) in &self.targets {
+                self.gl.delete_framebuffer(*framebuffer);
+                self.gl.delete_texture(*color_tex);
+            }
             self.gl.delete_texture(self.spectrum_tex);
         }
     }
@@ -506,8 +557,17 @@ fn flip_vertical(pixels: &mut [u8], width: u32, height: u32) {
     }
 }
 
-unsafe fn compile_program(gl: &glow::Context, user_shader: &str) -> Result<glow::Program> {
-    let frag_src = format!("{FRAG_PREAMBLE}\n{user_shader}\n{FRAG_MAIN}");
+unsafe fn compile_program(
+    gl: &glow::Context,
+    user_shader: &str,
+    pass_count: usize,
+) -> Result<glow::Program> {
+    // Declare iPass1..iPassN so any pass can sample any pass's output texture.
+    let mut pass_uniforms = String::new();
+    for i in 1..=pass_count {
+        pass_uniforms.push_str(&format!("uniform sampler2D iPass{i};\n"));
+    }
+    let frag_src = format!("{FRAG_PREAMBLE}{pass_uniforms}\n{user_shader}\n{FRAG_MAIN}");
     unsafe {
         let program = gl
             .create_program()
@@ -541,6 +601,30 @@ unsafe fn compile_program(gl: &glow::Context, user_shader: &str) -> Result<glow:
             bail!("shader link failed:\n{log}");
         }
         Ok(program)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_passes;
+
+    #[test]
+    fn no_marker_is_single_pass() {
+        let passes = split_passes("void mainImage(){}\n");
+        assert_eq!(passes.len(), 1);
+        assert!(passes[0].contains("mainImage"));
+    }
+
+    #[test]
+    fn marker_splits_into_ordered_passes() {
+        let src = "A\n//---pass---\nB\n//---pass\nC\n";
+        let passes = split_passes(src);
+        assert_eq!(passes.len(), 3);
+        assert!(passes[0].contains("A") && !passes[0].contains("B"));
+        assert!(passes[1].contains("B"));
+        assert!(passes[2].contains("C"));
+        // The marker lines themselves are dropped.
+        assert!(!passes.iter().any(|p| p.contains("---pass")));
     }
 }
 

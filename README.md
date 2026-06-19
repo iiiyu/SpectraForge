@@ -180,12 +180,25 @@ Shadertoy-style: define `mainImage`. These uniforms are injected automatically:
 | `iBass` `iMid` `iTreble` | `float`     | band energies (20–250 / 250–4k / 4k–20k Hz)           |
 | `iSpectrum`              | `sampler2D` | 64×1 texture; sample `.r` for a log-spaced bin (0..1) |
 
-Example shaders live under `shaders/`, split into two folders:
+Example shaders live under `shaders/without_audio/` — they animate on `iTime`
+alone and render identically for any input, so pair them with `--duration-only`
+(the MP3 is still muxed as the sound track). See
+`shaders/without_audio/limacon_glow.glsl` for a working example.
 
-- `shaders/with_audio/` — react to the audio uniforms above. Drive them with a
-  normal render (no `--duration-only`).
-- `shaders/without_audio/` — animate on `iTime` alone; the audio uniforms and
-  `iSpectrum` are synthesized internally, so the result is identical for any
-  input. Pair with `--duration-only` (the MP3 is still muxed as the sound track).
+### Multipass shaders
 
-See `shaders/with_audio/vis.glsl` for a working example.
+A shader file can declare several passes, separated by a line that starts with
+`//---pass`. Each pass renders to its own texture; later passes sample earlier
+ones via `iPass1`, `iPass2`, … (pass 1 is `iPass1`, and so on). The last pass is
+the image written to video. A file with no `//---pass` marker is a single pass,
+exactly as before.
+
+```glsl
+// Pass 1 -> iPass1
+void mainImage(out vec4 c, in vec2 p) { c = vec4(p / iResolution.xy, 0.0, 1.0); }
+//---pass---
+// Pass 2 (final): composite the earlier pass
+void mainImage(out vec4 c, in vec2 p) { c = texture(iPass1, p / iResolution.xy); }
+```
+
+See `shaders/without_audio/feedback_bloom.glsl` for a 3-pass example.

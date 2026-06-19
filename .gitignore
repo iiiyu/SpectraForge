@@ -4,3 +4,4 @@
 *.srt
 *.ass
 *.json
+.DS_Store

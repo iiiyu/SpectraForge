@@ -3,6 +3,8 @@ mod audio;
 mod encode;
 mod lyrics;
 mod render;
+mod subtitle;
+mod text;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
@@ -89,35 +91,30 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    let (duration, audio_data) = if args.duration_only {
+    let (duration, analyzer) = if args.duration_only {
         let duration = audio::duration(&args.input).context("reading input audio duration")?;
-        (duration, None)
-    } else {
-        let (samples, sample_rate) = audio::decode(&args.input).context("decoding input audio")?;
-        let duration = samples.len() as f32 / sample_rate as f32;
-        (duration, Some((samples, sample_rate)))
-    };
-    let total_frames = (duration * args.fps as f32).ceil() as usize;
-    if let Some((_, sample_rate)) = &audio_data {
-        eprintln!(
-            "decoded {:.1}s @ {} Hz -> {} frames @ {} fps",
-            duration, sample_rate, total_frames, args.fps
-        );
-    } else {
+        let total_frames = (duration * args.fps as f32).ceil() as usize;
         eprintln!(
             "duration-only {:.1}s -> {} frames @ {} fps",
             duration, total_frames, args.fps
         );
-    }
+        (duration, analysis::Analyzer::silent())
+    } else {
+        let (samples, sample_rate) = audio::decode(&args.input).context("decoding input audio")?;
+        let duration = samples.len() as f32 / sample_rate as f32;
+        let total_frames = (duration * args.fps as f32).ceil() as usize;
+        eprintln!(
+            "decoded {:.1}s @ {} Hz -> {} frames @ {} fps",
+            duration, sample_rate, total_frames, args.fps
+        );
+        (duration, analysis::Analyzer::reactive(samples, sample_rate))
+    };
+    let total_frames = (duration * args.fps as f32).ceil() as usize;
 
     if args.dump_features {
-        let silent_features = analysis::silent();
         for i in 0..total_frames {
             let t = i as f32 / args.fps as f32;
-            let features = audio_data
-                .as_ref()
-                .map(|(samples, sample_rate)| analysis::analyze(samples, *sample_rate, t));
-            let f = features.as_ref().unwrap_or(&silent_features);
+            let f = analyzer.at(t);
             println!(
                 "{:6.3}s rms={:.4} bass={:.4} mid={:.4} treble={:.4}",
                 t, f.rms, f.bass, f.mid, f.treble
@@ -132,58 +129,54 @@ fn main() -> Result<()> {
         (None, true) => {
             let out_dir = args.output.parent().filter(|p| !p.as_os_str().is_empty());
             let out_dir = out_dir.unwrap_or_else(|| std::path::Path::new("."));
-            lyrics::transcribe(&args.input, &args.whisper_cmd, &args.whisper_model, out_dir)
+            subtitle::transcribe(&args.input, &args.whisper_cmd, &args.whisper_model, out_dir)
                 .context("transcribing lyrics")?
         }
         (None, false) => None,
     };
-    let lyric_overlay = match subtitles {
-        Some(path) => {
-            let style = match args.subtitle_style {
-                SubtitleStyle::Plain => lyrics::OverlayStyle::Plain,
-                SubtitleStyle::Mv => lyrics::OverlayStyle::Mv,
-            };
-            Some(
-                lyrics::LyricOverlay::from_subtitles(
-                    &path,
-                    args.width,
-                    args.height,
-                    &args.subtitle_font,
-                    args.subtitle_font_size,
-                    args.subtitle_fonts_dir.as_deref(),
-                    style,
-                )
-                .context("preparing lyric overlay")?,
+    // Overlays composite in order: lyrics first (lower), title on top.
+    let mut overlay_stack: Vec<Box<dyn lyrics::Overlay>> = Vec::new();
+    if let Some(path) = subtitles {
+        let style = match args.subtitle_style {
+            SubtitleStyle::Plain => lyrics::OverlayStyle::Plain,
+            SubtitleStyle::Mv => lyrics::OverlayStyle::Mv,
+        };
+        overlay_stack.push(Box::new(
+            lyrics::LyricOverlay::from_subtitles(
+                &path,
+                args.width,
+                args.height,
+                &args.subtitle_font,
+                args.subtitle_font_size,
+                args.subtitle_fonts_dir.as_deref(),
+                style,
             )
-        }
-        None => None,
-    };
-
-    let title_overlay = match &args.title {
-        Some(text) => {
-            let text = if text.is_empty() {
-                args.input
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_string()
-            } else {
-                text.clone()
-            };
-            Some(
-                lyrics::LyricOverlay::title(
-                    &text,
-                    args.width,
-                    args.height,
-                    &args.subtitle_font,
-                    args.subtitle_font_size,
-                    args.subtitle_fonts_dir.as_deref(),
-                )
-                .context("preparing title overlay")?,
+            .context("preparing lyric overlay")?,
+        ));
+    }
+    if let Some(text) = &args.title {
+        let text = if text.is_empty() {
+            args.input
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string()
+        } else {
+            text.clone()
+        };
+        overlay_stack.push(Box::new(
+            lyrics::TitleOverlay::new(
+                &text,
+                args.width,
+                args.height,
+                &args.subtitle_font,
+                args.subtitle_font_size,
+                args.subtitle_fonts_dir.as_deref(),
             )
-        }
-        None => None,
-    };
+            .context("preparing title overlay")?,
+        ));
+    }
+    let mut overlays = lyrics::Overlays::new(overlay_stack);
 
     let shader_src = std::fs::read_to_string(&args.shader)
         .with_context(|| format!("reading shader {}", args.shader.display()))?;
@@ -194,27 +187,10 @@ fn main() -> Result<()> {
         encode::Encoder::new(&args.output, &args.input, args.width, args.height, args.fps)
             .context("starting ffmpeg encoder")?;
 
-    let silent_features = analysis::silent();
-    let mut composited_frame = Vec::new();
     for i in 0..total_frames {
         let t = i as f32 / args.fps as f32;
-        let frame = if let Some((samples, sample_rate)) = &audio_data {
-            let features = analysis::analyze(samples, *sample_rate, t);
-            renderer.render_frame(t, &features)
-        } else {
-            renderer.render_frame(t, &silent_features)
-        };
-        let overlays = [lyric_overlay.as_ref(), title_overlay.as_ref()];
-        if overlays.iter().any(Option::is_some) {
-            composited_frame.clear();
-            composited_frame.extend_from_slice(frame);
-            for overlay in overlays.into_iter().flatten() {
-                overlay.draw(&mut composited_frame, t);
-            }
-            encoder.write_frame(&composited_frame)?;
-        } else {
-            encoder.write_frame(frame)?;
-        }
+        let frame = renderer.render_frame(t, &analyzer.at(t));
+        encoder.write_frame(overlays.composite(frame, t))?;
         if i % args.fps as usize == 0 {
             eprint!("\rrendering {}/{}", i, total_frames);
         }

@@ -1,4 +1,5 @@
-use rustfft::{FftPlanner, num_complex::Complex};
+use rustfft::{Fft, FftPlanner, num_complex::Complex};
+use std::sync::Arc;
 
 const FFT_SIZE: usize = 2048;
 pub const SPECTRUM_BINS: usize = 64;
@@ -13,8 +14,47 @@ pub struct Features {
     pub spectrum: Vec<f32>,
 }
 
-/// A fixed, non-reactive feature set for renders that only use audio duration.
-pub fn silent() -> Features {
+/// Per-frame audio features. Either drives features from decoded samples
+/// (reactive) or returns a fixed silent set (duration-only renders). The FFT
+/// plan is built once at construction and reused for every `at`.
+pub struct Analyzer {
+    inner: Option<Reactive>,
+}
+
+struct Reactive {
+    samples: Vec<f32>,
+    sample_rate: u32,
+    fft: Arc<dyn Fft<f32>>,
+}
+
+impl Analyzer {
+    /// Audio-reactive analyzer over decoded mono samples. Plans the FFT once.
+    pub fn reactive(samples: Vec<f32>, sample_rate: u32) -> Self {
+        let fft = FftPlanner::new().plan_fft_forward(FFT_SIZE);
+        Self {
+            inner: Some(Reactive {
+                samples,
+                sample_rate,
+                fft,
+            }),
+        }
+    }
+
+    /// Non-reactive analyzer; every `at` returns zeroed features.
+    pub fn silent() -> Self {
+        Self { inner: None }
+    }
+
+    /// Features for the frame centered at `time` seconds.
+    pub fn at(&self, time: f32) -> Features {
+        match &self.inner {
+            Some(reactive) => reactive.analyze(time),
+            None => silent_features(),
+        }
+    }
+}
+
+fn silent_features() -> Features {
     Features {
         rms: 0.0,
         bass: 0.0,
@@ -24,73 +64,75 @@ pub fn silent() -> Features {
     }
 }
 
-/// Analyze a Hann-windowed FFT_SIZE window centered at `time` seconds.
-pub fn analyze(samples: &[f32], sample_rate: u32, time: f32) -> Features {
-    let center = (time * sample_rate as f32) as isize;
-    let start = center - (FFT_SIZE as isize) / 2;
+impl Reactive {
+    /// Analyze a Hann-windowed FFT_SIZE window centered at `time` seconds.
+    fn analyze(&self, time: f32) -> Features {
+        let samples = &self.samples;
+        let sample_rate = self.sample_rate;
+        let center = (time * sample_rate as f32) as isize;
+        let start = center - (FFT_SIZE as isize) / 2;
 
-    // Gather windowed samples, zero-padding past the signal edges.
-    let mut buf: Vec<Complex<f32>> = Vec::with_capacity(FFT_SIZE);
-    let mut sum_sq = 0.0f32;
-    for n in 0..FFT_SIZE {
-        let idx = start + n as isize;
-        let s = if idx >= 0 && (idx as usize) < samples.len() {
-            samples[idx as usize]
-        } else {
-            0.0
+        // Gather windowed samples, zero-padding past the signal edges.
+        let mut buf: Vec<Complex<f32>> = Vec::with_capacity(FFT_SIZE);
+        let mut sum_sq = 0.0f32;
+        for n in 0..FFT_SIZE {
+            let idx = start + n as isize;
+            let s = if idx >= 0 && (idx as usize) < samples.len() {
+                samples[idx as usize]
+            } else {
+                0.0
+            };
+            sum_sq += s * s;
+            // Hann window.
+            let w = 0.5 - 0.5 * (std::f32::consts::TAU * n as f32 / (FFT_SIZE as f32 - 1.0)).cos();
+            buf.push(Complex::new(s * w, 0.0));
+        }
+        let rms = (sum_sq / FFT_SIZE as f32).sqrt();
+
+        self.fft.process(&mut buf);
+
+        // Magnitude of the usable (non-mirrored) half.
+        let half = FFT_SIZE / 2;
+        let bin_hz = sample_rate as f32 / FFT_SIZE as f32;
+        let mags: Vec<f32> = buf[..half].iter().map(|c| c.norm()).collect();
+
+        // Frequency bands (sum of magnitudes within Hz ranges, normalized by FFT size).
+        let norm = FFT_SIZE as f32;
+        let band = |lo: f32, hi: f32| -> f32 {
+            let a = (lo / bin_hz).floor() as usize;
+            let b = ((hi / bin_hz).ceil() as usize).min(half);
+            mags[a.min(half)..b.max(a.min(half))].iter().sum::<f32>() / norm
         };
-        sum_sq += s * s;
-        // Hann window.
-        let w = 0.5 - 0.5 * (std::f32::consts::TAU * n as f32 / (FFT_SIZE as f32 - 1.0)).cos();
-        buf.push(Complex::new(s * w, 0.0));
-    }
-    let rms = (sum_sq / FFT_SIZE as f32).sqrt();
+        let bass = band(20.0, 250.0);
+        let mid = band(250.0, 4000.0);
+        let treble = band(4000.0, 20000.0);
 
-    let mut planner = FftPlanner::new();
-    let fft = planner.plan_fft_forward(FFT_SIZE);
-    fft.process(&mut buf);
+        // Log-spaced spectrum bins from ~20 Hz to Nyquist.
+        let nyquist = sample_rate as f32 / 2.0;
+        let f_min = 20.0f32.max(bin_hz);
+        let mut spectrum = vec![0.0f32; SPECTRUM_BINS];
+        for (i, slot) in spectrum.iter_mut().enumerate() {
+            let lo = f_min * (nyquist / f_min).powf(i as f32 / SPECTRUM_BINS as f32);
+            let hi = f_min * (nyquist / f_min).powf((i + 1) as f32 / SPECTRUM_BINS as f32);
+            let a = (lo / bin_hz).floor() as usize;
+            let b = ((hi / bin_hz).ceil() as usize).max(a + 1).min(half);
+            let slice = &mags[a.min(half - 1)..b.max(a.min(half - 1) + 1).min(half)];
+            let avg = if slice.is_empty() {
+                0.0
+            } else {
+                slice.iter().sum::<f32>() / slice.len() as f32
+            };
+            // Compress dynamic range so quiet detail is still visible.
+            *slot = (avg / norm * 8.0).min(1.0);
+        }
 
-    // Magnitude of the usable (non-mirrored) half.
-    let half = FFT_SIZE / 2;
-    let bin_hz = sample_rate as f32 / FFT_SIZE as f32;
-    let mags: Vec<f32> = buf[..half].iter().map(|c| c.norm()).collect();
-
-    // Frequency bands (sum of magnitudes within Hz ranges, normalized by FFT size).
-    let norm = FFT_SIZE as f32;
-    let band = |lo: f32, hi: f32| -> f32 {
-        let a = (lo / bin_hz).floor() as usize;
-        let b = ((hi / bin_hz).ceil() as usize).min(half);
-        mags[a.min(half)..b.max(a.min(half))].iter().sum::<f32>() / norm
-    };
-    let bass = band(20.0, 250.0);
-    let mid = band(250.0, 4000.0);
-    let treble = band(4000.0, 20000.0);
-
-    // Log-spaced spectrum bins from ~20 Hz to Nyquist.
-    let nyquist = sample_rate as f32 / 2.0;
-    let f_min = 20.0f32.max(bin_hz);
-    let mut spectrum = vec![0.0f32; SPECTRUM_BINS];
-    for (i, slot) in spectrum.iter_mut().enumerate() {
-        let lo = f_min * (nyquist / f_min).powf(i as f32 / SPECTRUM_BINS as f32);
-        let hi = f_min * (nyquist / f_min).powf((i + 1) as f32 / SPECTRUM_BINS as f32);
-        let a = (lo / bin_hz).floor() as usize;
-        let b = ((hi / bin_hz).ceil() as usize).max(a + 1).min(half);
-        let slice = &mags[a.min(half - 1)..b.max(a.min(half - 1) + 1).min(half)];
-        let avg = if slice.is_empty() {
-            0.0
-        } else {
-            slice.iter().sum::<f32>() / slice.len() as f32
-        };
-        // Compress dynamic range so quiet detail is still visible.
-        *slot = (avg / norm * 8.0).min(1.0);
-    }
-
-    Features {
-        rms,
-        bass,
-        mid,
-        treble,
-        spectrum,
+        Features {
+            rms,
+            bass,
+            mid,
+            treble,
+            spectrum,
+        }
     }
 }
 
@@ -105,7 +147,7 @@ mod tests {
         let samples: Vec<f32> = (0..sr)
             .map(|n| (std::f32::consts::TAU * 440.0 * n as f32 / sr as f32).sin())
             .collect();
-        let f = analyze(&samples, sr, 0.5);
+        let f = Analyzer::reactive(samples, sr).at(0.5);
         assert!(
             f.mid > f.bass,
             "mid {} should exceed bass {}",
@@ -123,7 +165,7 @@ mod tests {
 
     #[test]
     fn silent_features_are_zeroed() {
-        let f = silent();
+        let f = Analyzer::silent().at(0.0);
         assert_eq!(f.rms, 0.0);
         assert_eq!(f.bass, 0.0);
         assert_eq!(f.mid, 0.0);

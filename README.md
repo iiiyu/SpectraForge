@@ -168,6 +168,37 @@ cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --o
     --lyrics --subtitle-style plain
 ```
 
+### Title
+
+A centered title is shown by default for the first 3s and then fades out. With
+no flags it uses the MP3 file stem (e.g. `song.mp3` → `song`); the filename is
+just a convenience default, not a promise it's the real song name.
+
+```bash
+# Override the text:
+cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4 \
+    --title "My Song"
+
+# Turn the title off:
+cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4 \
+    --no-title
+
+# Style the title independently of the lyrics (each defaults to its --subtitle-* counterpart):
+cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4 \
+    --title "My Song" \
+    --title-font "Georgia" --title-font-size 96 --title-fonts-dir ./fonts \
+    --title-duration 4.5
+```
+
+`--title-duration` sets how many seconds the title stays fully visible before
+fading out (default `3`); the fade-in/out timing is fixed. If the resolved title
+is empty (an input with no usable file stem), no title is drawn. `--title-font`,
+`--title-font-size`, and `--title-fonts-dir` each fall back to the corresponding
+`--subtitle-*` value when unset.
+
+When a requested font can't be found, SpectraForge falls back to any installed
+font rather than failing, and prints a warning naming the substitute.
+
 ## Writing a shader
 
 Shadertoy-style: define `mainImage`. These uniforms are injected automatically:

@@ -28,7 +28,7 @@ pub struct TimedWord {
 /// Transcribe `audio` to a Whisper JSON file with word timestamps.
 ///
 /// Runs e.g. `whisper song.mp3 --model medium --word_timestamps True
-/// --output_format json --output_dir <dir>`, which writes `<stem>.json` into
+/// --fp16 False --output_format json --output_dir <dir>`, which writes `<stem>.json` into
 /// `out_dir`. Returns the path to that file, or `None` if whisper produced no
 /// lyric cues (e.g. an instrumental track with no detectable speech).
 pub fn transcribe(
@@ -42,6 +42,9 @@ pub fn transcribe(
         .arg(audio)
         .args(["--model", model])
         .args(["--word_timestamps", "True"])
+        // FP16 produces all-NaN logits on some GPUs (e.g. NVIDIA T1200), making
+        // whisper crash mid-decode. FP32 is slightly slower but stable.
+        .args(["--fp16", "False"])
         .args(["--output_format", "json"])
         .arg("--output_dir")
         .arg(out_dir)

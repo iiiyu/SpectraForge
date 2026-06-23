@@ -75,9 +75,13 @@ struct Args {
     #[arg(long)]
     subtitle_fonts_dir: Option<PathBuf>,
 
-    /// Show a title (first 3s, then fades out). Defaults to the MP3 file name; pass text to override.
-    #[arg(long, num_args = 0..=1, default_missing_value = "")]
+    /// Title text shown for the first 3s, then fades out. Defaults to the MP3 file name.
+    #[arg(long)]
     title: Option<String>,
+
+    /// Suppress the title overlay (otherwise it shows the MP3 file name).
+    #[arg(long)]
+    no_title: bool,
 
     /// Use input audio only for output duration/audio; do not drive shader features from it
     #[arg(long)]
@@ -154,16 +158,14 @@ fn main() -> Result<()> {
             .context("preparing lyric overlay")?,
         ));
     }
-    if let Some(text) = &args.title {
-        let text = if text.is_empty() {
+    if !args.no_title {
+        let text = args.title.clone().unwrap_or_else(|| {
             args.input
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_string()
-        } else {
-            text.clone()
-        };
+        });
         overlay_stack.push(Box::new(
             lyrics::TitleOverlay::new(
                 &text,

@@ -264,7 +264,12 @@ fn load_font(font_name: &str, fonts_dir: Option<&Path>) -> Result<FontVec> {
                 ..Query::default()
             })
         })
-        .with_context(|| format!("could not find subtitle font \"{font_name}\""))?;
+        // Last resort: any installed face. The named/sans-serif queries can both
+        // miss on minimal systems where fontdb has no configured default family.
+        .or_else(|| db.faces().next().map(|face| face.id))
+        .with_context(|| {
+            format!("no usable system font found (requested \"{font_name}\")")
+        })?;
 
     let (data, face_index) = db
         .with_face_data(id, |data, face_index| (data.to_vec(), face_index))

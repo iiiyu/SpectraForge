@@ -249,27 +249,29 @@ fn load_font(font_name: &str, fonts_dir: Option<&Path>) -> Result<FontVec> {
     }
     db.load_system_fonts();
 
-    let named = [Family::Name(font_name), Family::SansSerif];
-    let fallback = [Family::SansSerif];
-    let id = db
-        .query(&Query {
-            families: &named,
+    // Try the requested family first, on its own, so we can tell whether it
+    // actually matched. Then sans-serif, then any installed face (minimal
+    // systems may have no configured default family).
+    let bold = |families: &[Family]| {
+        db.query(&Query {
+            families,
             weight: Weight::BOLD,
             ..Query::default()
         })
-        .or_else(|| {
-            db.query(&Query {
-                families: &fallback,
-                weight: Weight::BOLD,
-                ..Query::default()
-            })
-        })
-        // Last resort: any installed face. The named/sans-serif queries can both
-        // miss on minimal systems where fontdb has no configured default family.
+    };
+    let matched_request = bold(&[Family::Name(font_name)]).is_some();
+    let id = bold(&[Family::Name(font_name)])
+        .or_else(|| bold(&[Family::SansSerif]))
         .or_else(|| db.faces().next().map(|face| face.id))
-        .with_context(|| {
-            format!("no usable system font found (requested \"{font_name}\")")
-        })?;
+        .with_context(|| format!("no usable system font found (requested \"{font_name}\")"))?;
+
+    if !matched_request {
+        let used = db
+            .face(id)
+            .and_then(|face| face.families.first().map(|(name, _)| name.clone()))
+            .unwrap_or_else(|| "unknown".to_string());
+        eprintln!("subtitle font \"{font_name}\" not found; using \"{used}\"");
+    }
 
     let (data, face_index) = db
         .with_face_data(id, |data, face_index| (data.to_vec(), face_index))

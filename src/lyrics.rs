@@ -44,7 +44,6 @@ pub enum OverlayStyle {
     Mv,
 }
 
-const TITLE_HOLD_MS: u64 = 3000;
 const TITLE_FADE_IN_MS: u64 = 400;
 const TITLE_FADE_OUT_MS: u64 = 700;
 
@@ -151,6 +150,7 @@ pub struct TitleOverlay {
     renderer: TextRenderer,
     text: String,
     font_size: u32,
+    hold_ms: u64,
 }
 
 impl TitleOverlay {
@@ -161,13 +161,16 @@ impl TitleOverlay {
         font_name: &str,
         requested_font_size: u32,
         fonts_dir: Option<&Path>,
+        hold_seconds: f32,
     ) -> Result<Self> {
         let font_size = effective_font_size(height, requested_font_size);
         let renderer = TextRenderer::new(width, height, font_name, fonts_dir)?;
+        let hold_ms = (hold_seconds.max(0.0) * 1000.0).round() as u64;
         Ok(Self {
             renderer,
             text: text.to_string(),
             font_size,
+            hold_ms,
         })
     }
 }
@@ -175,15 +178,15 @@ impl TitleOverlay {
 impl Overlay for TitleOverlay {
     fn draw(&self, frame: &mut [u8], time_seconds: f32) {
         let time_ms = (time_seconds.max(0.0) * 1000.0).round() as u64;
-        if time_ms >= TITLE_HOLD_MS + TITLE_FADE_OUT_MS {
+        if time_ms >= self.hold_ms + TITLE_FADE_OUT_MS {
             return;
         }
         let alpha = if time_ms < TITLE_FADE_IN_MS {
             time_ms as f32 / TITLE_FADE_IN_MS as f32
-        } else if time_ms < TITLE_HOLD_MS {
+        } else if time_ms < self.hold_ms {
             1.0
         } else {
-            1.0 - (time_ms - TITLE_HOLD_MS) as f32 / TITLE_FADE_OUT_MS as f32
+            1.0 - (time_ms - self.hold_ms) as f32 / TITLE_FADE_OUT_MS as f32
         };
         let scale = self.font_size as f32 * 1.25;
         let lines = self.renderer.layout(&self.text, scale.round() as u32, 2);

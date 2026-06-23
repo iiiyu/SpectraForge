@@ -83,6 +83,22 @@ struct Args {
     #[arg(long)]
     no_title: bool,
 
+    /// Font family for the title. Defaults to --subtitle-font.
+    #[arg(long)]
+    title_font: Option<String>,
+
+    /// Font size for the title; 0 chooses a size from video height. Defaults to --subtitle-font-size.
+    #[arg(long)]
+    title_font_size: Option<u32>,
+
+    /// Directory of custom font files for the title. Defaults to --subtitle-fonts-dir.
+    #[arg(long)]
+    title_fonts_dir: Option<PathBuf>,
+
+    /// Seconds the title stays fully visible before fading out (fades are fixed).
+    #[arg(long, default_value_t = 3.0)]
+    title_duration: f32,
+
     /// Use input audio only for output duration/audio; do not drive shader features from it
     #[arg(long)]
     duration_only: bool,
@@ -166,17 +182,31 @@ fn main() -> Result<()> {
                 .unwrap_or("")
                 .to_string()
         });
-        overlay_stack.push(Box::new(
-            lyrics::TitleOverlay::new(
-                &text,
-                args.width,
-                args.height,
-                &args.subtitle_font,
-                args.subtitle_font_size,
-                args.subtitle_fonts_dir.as_deref(),
-            )
-            .context("preparing title overlay")?,
-        ));
+        // Empty/whitespace title (e.g. an input with no usable file stem) means
+        // no title — skip the overlay rather than load a font to draw nothing.
+        if text.trim().is_empty() {
+            // ponytail: silently no-op; the user gets a video without a title.
+        } else {
+            // Title styling falls back to the subtitle styling when unset.
+            let title_font = args.title_font.as_deref().unwrap_or(&args.subtitle_font);
+            let title_font_size = args.title_font_size.unwrap_or(args.subtitle_font_size);
+            let title_fonts_dir = args
+                .title_fonts_dir
+                .as_deref()
+                .or(args.subtitle_fonts_dir.as_deref());
+            overlay_stack.push(Box::new(
+                lyrics::TitleOverlay::new(
+                    &text,
+                    args.width,
+                    args.height,
+                    title_font,
+                    title_font_size,
+                    title_fonts_dir,
+                    args.title_duration,
+                )
+                .context("preparing title overlay")?,
+            ));
+        }
     }
     let mut overlays = lyrics::Overlays::new(overlay_stack);
 

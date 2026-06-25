@@ -228,12 +228,14 @@ pub fn ease_out(t: f32) -> f32 {
 }
 
 /// Resolve the subtitle font size: honour an explicit request, else derive from
-/// the frame height.
-pub fn effective_font_size(height: u32, requested: u32) -> u32 {
+/// the frame *width* — that's what bounds how much text fits on a line, so the
+/// size adapts to the aspect ratio (e.g. 9:16 portrait wraps narrower, so gets a
+/// smaller font than 16:9 landscape). Factor keeps 1920-wide landscape ≈ 92px.
+pub fn effective_font_size(width: u32, requested: u32) -> u32 {
     if requested > 0 {
         requested
     } else {
-        ((height as f32 * 0.085).round() as u32).clamp(34, 92)
+        ((width as f32 * 0.048).round() as u32).clamp(34, 92)
     }
 }
 

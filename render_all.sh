@@ -19,7 +19,7 @@ for shader in shaders/without_audio/*.glsl; do
     fi
     echo "==> $out"
     # These shaders animate on time alone; --duration-only skips audio analysis.
-    ./target/release/SpectraForge --input "$input" --shader "$shader" --output "$out" --duration-only
+    ./target/release/SpectraForge render --input "$input" --shader "$shader" --output "$out" --duration-only
 done
 
 echo "done -> $outdir/"

@@ -22,7 +22,9 @@ cargo fmt            # format
 
 ## Architecture
 
-Single binary crate; `main.rs` orchestrates the pipeline. Modules:
+Single binary crate; `main.rs` exposes three subcommands — `transcribe`
+(whisper → JSON), `align` (correct lyrics onto whisper timings), `render` (the
+full video pipeline) — so each stage runs in isolation. Modules:
 
 - `audio` — decode an MP3 to mono f32 samples (symphonia), or read duration only.
 - `analysis` — `Analyzer` owns the decoded samples + a once-planned FFT; `.at(t)`
@@ -34,6 +36,8 @@ Single binary crate; `main.rs` orchestrates the pipeline. Modules:
   (outline/shadow) onto rgb24 frames.
 - `subtitle` — cue/timing model: parse SRT or Whisper JSON, hallucination filtering,
   per-word karaoke highlight timing, and `transcribe` (shells out to whisper).
+- `align` — Needleman-Wunsch align ground-truth lyric text onto Whisper word
+  timings (mishears keep timing, dropped words interpolate); emits corrected JSON.
 - `lyrics` — the `Overlay` trait and its adapters: `LyricOverlay` (Plain/Mv styles,
   composes `TextRenderer` + cues) and `TitleOverlay` (fading title). `Overlays` owns
   the ordered stack and per-frame compositing.

@@ -1,3 +1,4 @@
+mod align;
 mod analysis;
 mod audio;
 mod encode;
@@ -7,8 +8,28 @@ mod subtitle;
 mod text;
 
 use anyhow::{Context, Result};
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
+
+/// Video aspect ratio presets. Each maps to a 1080p YouTube-ready resolution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum Aspect {
+    /// 16:9 landscape, 1920x1080 — standard YouTube videos.
+    #[value(name = "16:9")]
+    Wide,
+    /// 9:16 portrait, 1080x1920 — YouTube Shorts / TikTok / Reels.
+    #[value(name = "9:16")]
+    Tall,
+}
+
+impl Aspect {
+    fn dimensions(self) -> (u32, u32) {
+        match self {
+            Aspect::Wide => (1920, 1080),
+            Aspect::Tall => (1080, 1920),
+        }
+    }
+}
 
 /// Turn an MP3 into an audio-reactive video driven by a GLSL fragment shader.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -21,7 +42,57 @@ enum SubtitleStyle {
 
 #[derive(Parser, Debug)]
 #[command(name = "spectraforge", version, about)]
-struct Args {
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Transcribe an MP3 to a Whisper JSON with word timings (step 1).
+    Transcribe(TranscribeArgs),
+    /// Align ground-truth lyrics onto Whisper timings → corrected JSON (step 2).
+    Align(AlignArgs),
+    /// Render the audio-reactive video, optionally with overlays (step 3).
+    Render(RenderArgs),
+}
+
+#[derive(Parser, Debug)]
+struct TranscribeArgs {
+    /// Input MP3 file
+    #[arg(short, long)]
+    input: PathBuf,
+
+    /// Output JSON path (default: <input stem>.json next to the input)
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+
+    /// Whisper command to invoke for transcription
+    #[arg(long, default_value = "whisper")]
+    whisper_cmd: String,
+
+    /// Whisper model to use (e.g. tiny, base, small, medium, large)
+    #[arg(long, default_value = "medium")]
+    whisper_model: String,
+}
+
+#[derive(Parser, Debug)]
+struct AlignArgs {
+    /// Plain-text ground-truth lyrics (one line per lyric line)
+    #[arg(short, long)]
+    lyrics: PathBuf,
+
+    /// Whisper JSON with word timings (from `transcribe`)
+    #[arg(short, long)]
+    whisper: PathBuf,
+
+    /// Output corrected JSON path
+    #[arg(short, long)]
+    output: PathBuf,
+}
+
+#[derive(Parser, Debug)]
+struct RenderArgs {
     /// Input MP3 file
     #[arg(short, long)]
     input: PathBuf,
@@ -34,28 +105,22 @@ struct Args {
     #[arg(short, long)]
     output: PathBuf,
 
-    #[arg(long, default_value_t = 1280)]
-    width: u32,
+    /// Video aspect: `16:9` (YouTube, 1920x1080) or `9:16` (Shorts, 1080x1920).
+    #[arg(long, value_enum, default_value = "16:9")]
+    aspect: Aspect,
 
-    #[arg(long, default_value_t = 720)]
-    height: u32,
+    /// Override width in pixels (otherwise derived from --aspect).
+    #[arg(long)]
+    width: Option<u32>,
+
+    /// Override height in pixels (otherwise derived from --aspect).
+    #[arg(long)]
+    height: Option<u32>,
 
     #[arg(long, default_value_t = 30)]
     fps: u32,
 
-    /// Transcribe lyrics with whisper and render them into the video
-    #[arg(long)]
-    lyrics: bool,
-
-    /// Whisper command to invoke for transcription
-    #[arg(long, default_value = "whisper")]
-    whisper_cmd: String,
-
-    /// Whisper model to use (e.g. tiny, base, small, medium, large)
-    #[arg(long, default_value = "medium")]
-    whisper_model: String,
-
-    /// Use an existing .srt subtitle file or Whisper .json instead of transcribing
+    /// SRT or Whisper/aligned JSON file to render as lyrics (from `transcribe`/`align`)
     #[arg(long)]
     subtitles: Option<PathBuf>,
 
@@ -109,7 +174,55 @@ struct Args {
 }
 
 fn main() -> Result<()> {
-    let args = Args::parse();
+    let cli = Cli::parse();
+    match cli.command {
+        Command::Transcribe(args) => transcribe(args),
+        Command::Align(args) => {
+            let json = align::align_files(&args.lyrics, &args.whisper)?;
+            std::fs::write(&args.output, json)
+                .with_context(|| format!("writing {}", args.output.display()))?;
+            eprintln!("wrote {}", args.output.display());
+            Ok(())
+        }
+        Command::Render(args) => render(args),
+    }
+}
+
+fn transcribe(args: TranscribeArgs) -> Result<()> {
+    let out_dir = args
+        .output
+        .as_ref()
+        .and_then(|p| p.parent())
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| args.input.parent().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let json = subtitle::transcribe(
+        &args.input,
+        &args.whisper_cmd,
+        &args.whisper_model,
+        &out_dir,
+    )
+    .context("transcribing lyrics")?
+    .context("no lyrics detected in audio")?;
+    // Whisper writes <stem>.json into out_dir; rename if the user picked a path.
+    if let Some(output) = &args.output
+        && output != &json
+    {
+        std::fs::rename(&json, output)
+            .with_context(|| format!("moving {} -> {}", json.display(), output.display()))?;
+        eprintln!("wrote {}", output.display());
+    } else {
+        eprintln!("wrote {}", json.display());
+    }
+    Ok(())
+}
+
+fn render(args: RenderArgs) -> Result<()> {
+    // --width/--height override the --aspect preset independently.
+    let (aw, ah) = args.aspect.dimensions();
+    let width = args.width.unwrap_or(aw);
+    let height = args.height.unwrap_or(ah);
 
     let (duration, analyzer) = if args.duration_only {
         let duration = audio::duration(&args.input).context("reading input audio duration")?;
@@ -143,20 +256,9 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Resolve subtitles: an explicit subtitle file wins; otherwise transcribe if asked.
-    let subtitles = match (&args.subtitles, args.lyrics) {
-        (Some(srt), _) => Some(srt.clone()),
-        (None, true) => {
-            let out_dir = args.output.parent().filter(|p| !p.as_os_str().is_empty());
-            let out_dir = out_dir.unwrap_or_else(|| std::path::Path::new("."));
-            subtitle::transcribe(&args.input, &args.whisper_cmd, &args.whisper_model, out_dir)
-                .context("transcribing lyrics")?
-        }
-        (None, false) => None,
-    };
     // Overlays composite in order: lyrics first (lower), title on top.
     let mut overlay_stack: Vec<Box<dyn lyrics::Overlay>> = Vec::new();
-    if let Some(path) = subtitles {
+    if let Some(path) = args.subtitles {
         let style = match args.subtitle_style {
             SubtitleStyle::Plain => lyrics::OverlayStyle::Plain,
             SubtitleStyle::Mv => lyrics::OverlayStyle::Mv,
@@ -164,8 +266,8 @@ fn main() -> Result<()> {
         overlay_stack.push(Box::new(
             lyrics::LyricOverlay::from_subtitles(
                 &path,
-                args.width,
-                args.height,
+                width,
+                height,
                 &args.subtitle_font,
                 args.subtitle_font_size,
                 args.subtitle_fonts_dir.as_deref(),
@@ -197,8 +299,8 @@ fn main() -> Result<()> {
             overlay_stack.push(Box::new(
                 lyrics::TitleOverlay::new(
                     &text,
-                    args.width,
-                    args.height,
+                    width,
+                    height,
                     title_font,
                     title_font_size,
                     title_fonts_dir,
@@ -213,10 +315,10 @@ fn main() -> Result<()> {
     let shader_src = std::fs::read_to_string(&args.shader)
         .with_context(|| format!("reading shader {}", args.shader.display()))?;
 
-    let mut renderer = render::Renderer::new(args.width, args.height, &shader_src)
+    let mut renderer = render::Renderer::new(width, height, &shader_src)
         .context("initializing renderer")?;
     let mut encoder =
-        encode::Encoder::new(&args.output, &args.input, args.width, args.height, args.fps)
+        encode::Encoder::new(&args.output, &args.input, width, height, args.fps)
             .context("starting ffmpeg encoder")?;
 
     for i in 0..total_frames {

@@ -8,7 +8,7 @@ Pipeline: `mp3 → decode/duration → GLSL uniforms → headless render → sty
 
 - **ffmpeg** on `PATH` (used for both decoding deps and final encoding).
 - **Mesa EGL** for headless OpenGL.
-- **whisper** on `PATH` only when using `--lyrics`.
+- **whisper** on `PATH` only when using the `transcribe` step.
 
 ### macOS
 
@@ -37,7 +37,7 @@ running `cargo`:
 
 ```bash
 export DYLD_FALLBACK_LIBRARY_PATH="$(brew --prefix mesa)/lib:${DYLD_FALLBACK_LIBRARY_PATH:-}"
-cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4
+cargo run --release -- render --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4
 ```
 
 Or point SpectraForge directly at the EGL library:
@@ -52,8 +52,8 @@ startup. This keeps GLSL shader compatibility while using Apple's hardware path.
 Mesa EGL remains available as a fallback or for non-interactive environments:
 
 ```bash
-SPECTRAFORGE_RENDER_BACKEND=metal cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4
-SPECTRAFORGE_RENDER_BACKEND=egl cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4
+SPECTRAFORGE_RENDER_BACKEND=metal cargo run --release -- render --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4
+SPECTRAFORGE_RENDER_BACKEND=egl cargo run --release -- render --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4
 ```
 
 This is a Metal-backed OpenGL path, not a direct Metal Shading Language backend.
@@ -64,8 +64,8 @@ macOS also defaults to FFmpeg's hardware H.264 encoder (`h264_videotoolbox`).
 Override the encoder or bitrate if needed:
 
 ```bash
-SPECTRAFORGE_VIDEO_CODEC=libx264 cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4
-SPECTRAFORGE_VIDEO_BITRATE=24M cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4
+SPECTRAFORGE_VIDEO_CODEC=libx264 cargo run --release -- render --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4
+SPECTRAFORGE_VIDEO_BITRATE=24M cargo run --release -- render --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4
 ```
 
 To keep that setting for future zsh sessions:
@@ -74,7 +74,7 @@ To keep that setting for future zsh sessions:
 echo 'export DYLD_FALLBACK_LIBRARY_PATH="$(brew --prefix mesa)/lib:${DYLD_FALLBACK_LIBRARY_PATH:-}"' >> ~/.zshrc
 ```
 
-Whisper is optional and only needed when using `--lyrics`. Install it with `uv`
+Whisper is optional and only needed for the `transcribe` step. Install it with `uv`
 so the `whisper` command is available on `PATH`:
 
 ```bash
@@ -89,10 +89,10 @@ shell configuration and open a new terminal:
 uv tool update-shell
 ```
 
-When you want lyrics, run SpectraForge from a shell where `whisper` is available:
+When you want lyrics, run the `transcribe` step from a shell where `whisper` is available:
 
 ```bash
-cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4 --lyrics
+cargo run --release -- transcribe --input song.mp3 --output song.json
 ```
 
 ### Linux / WSL2
@@ -100,7 +100,7 @@ cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --o
 ```bash
 sudo apt update
 sudo apt install ffmpeg libegl1 libgl1-mesa-dri
-uv tool install openai-whisper  # only for --lyrics
+uv tool install openai-whisper  # only for the transcribe step
 ```
 
 On WSL2, Mesa usually falls back to software rendering (`llvmpipe`). That works,
@@ -108,17 +108,25 @@ but is slower than hardware rendering.
 
 ## Usage
 
-```bash
-cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4 \
-    [--width 1280] [--height 720] [--fps 30]
+SpectraForge has three subcommands that map to the pipeline stages, so each step
+can be run and inspected in isolation: `transcribe` (audio → Whisper JSON),
+`align` (correct the words against ground-truth lyrics), and `render` (the video).
 
-cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4 --width 1920 --height 1080 --fps 30
+```bash
+cargo run --release -- render --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4 \
+    [--aspect 16:9] [--fps 30]
+
+# 16:9 (1920x1080) for standard YouTube, 9:16 (1080x1920) for Shorts/TikTok/Reels:
+cargo run --release -- render --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4 --aspect 9:16
+
+# --width/--height override the --aspect preset when you need an exact size:
+cargo run --release -- render --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4 --width 1280 --height 720
 
 # Use the MP3 only for duration/output audio; shader audio uniforms stay silent:
-cargo run --release -- --input song.mp3 --shader shaders/without_audio/rover_seasons_loop.glsl --output out.mp4 --duration-only
+cargo run --release -- render --input song.mp3 --shader shaders/without_audio/rover_seasons_loop.glsl --output out.mp4 --duration-only
 
 # Inspect audio features without rendering:
-cargo run -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output x.mp4 --dump-features
+cargo run -- render --input song.mp3 --shader shaders/with_audio/vis.glsl --output x.mp4 --dump-features
 ```
 
 Rendered videos include the input MP3 audio track. `--duration-only` only turns
@@ -126,16 +134,26 @@ off audio-reactive shader features; it does not mute or remove the output audio.
 
 ### Lyrics as subtitles
 
-Transcribe the song with whisper and burn the lyrics into the video:
+Lyrics are a two-step prep (`transcribe`, optional `align`) feeding `render`'s
+`--subtitles`:
 
 ```bash
-cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4 \
-    --lyrics [--whisper-model medium] [--whisper-cmd whisper]
+# 1. Transcribe with whisper to a JSON with word timings:
+cargo run --release -- transcribe --input song.mp3 --output song.json \
+    [--whisper-model medium] [--whisper-cmd whisper]
 
-# Or supply your own subtitle file (skips transcription):
-cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4 \
-    --subtitles song.srt
+# 2. (optional) Whisper mishears words; align the correct lyrics onto its timings:
+cargo run --release -- align --lyrics song.txt --whisper song.json --output song.aligned.json
+
+# 3. Render with the chosen subtitle JSON (or your own .srt):
+cargo run --release -- render --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4 \
+    --subtitles song.aligned.json
 ```
+
+The `align` step sequence-aligns (Needleman-Wunsch) the plain-text lyrics against
+Whisper's word stream, transferring each Whisper word's timing onto the correct
+word and interpolating any words Whisper dropped. `[Section]` headers and blank
+lines in the `.txt` are ignored; each remaining line becomes one karaoke cue.
 
 Lyrics default to SpectraForge's built-in animated MV/TikTok-style renderer with
 a bold custom font, black outline/shadow, fade/slide/scale motion, and timed
@@ -143,29 +161,28 @@ word highlighting. The lyrics are composited into each RGB frame before ffmpeg
 encodes the final MP4, so this does not depend on ffmpeg's `subtitles`,
 `drawtext`, or libass filters.
 
-`--lyrics` asks whisper for a `.json` transcript with `--word_timestamps True`
-and uses those per-word times for karaoke highlighting, so the first word does
-not highlight before its actual timestamp. `--subtitles` accepts either `.srt`
-or whisper `.json`; SRT has only cue-level timing, so SpectraForge applies a
-small first-word delay as a fallback. To reduce Whisper tail hallucinations,
-cue-like phrases with more than 3 words but less than 0.5s of source timing are
-dropped before rendering.
+`--subtitles` accepts either `.srt` or a Whisper/aligned `.json`. The JSON's
+per-word times drive karaoke highlighting, so the first word does not highlight
+before its actual timestamp. SRT has only cue-level timing, so SpectraForge
+applies a small first-word delay as a fallback. To reduce Whisper tail
+hallucinations, cue-like phrases with more than 3 words but less than 0.5s of
+source timing are dropped before rendering.
 
 ```bash
-cargo run --release -- --input song.mp3 --shader shaders/without_audio/rover_seasons_loop.glsl --output out.mp4 \
-    --lyrics \
+cargo run --release -- render --input song.mp3 --shader shaders/without_audio/rover_seasons_loop.glsl --output out.mp4 \
+    --subtitles song.json \
     --subtitle-font "Arial Rounded MT Bold" \
     --subtitle-font-size 72
 
 # Use fonts from a custom font directory:
-cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4 \
+cargo run --release -- render --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4 \
     --subtitles song.json \
     --subtitle-font "My Display Font" \
     --subtitle-fonts-dir ./fonts
 
 # Keep the old plain subtitle renderer:
-cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4 \
-    --lyrics --subtitle-style plain
+cargo run --release -- render --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4 \
+    --subtitles song.json --subtitle-style plain
 ```
 
 ### Title
@@ -176,15 +193,15 @@ just a convenience default, not a promise it's the real song name.
 
 ```bash
 # Override the text:
-cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4 \
+cargo run --release -- render --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4 \
     --title "My Song"
 
 # Turn the title off:
-cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4 \
+cargo run --release -- render --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4 \
     --no-title
 
 # Style the title independently of the lyrics (each defaults to its --subtitle-* counterpart):
-cargo run --release -- --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4 \
+cargo run --release -- render --input song.mp3 --shader shaders/with_audio/vis.glsl --output out.mp4 \
     --title "My Song" \
     --title-font "Georgia" --title-font-size 96 --title-fonts-dir ./fonts \
     --title-duration 4.5

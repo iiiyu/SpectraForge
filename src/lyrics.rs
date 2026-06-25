@@ -79,7 +79,7 @@ impl LyricOverlay {
             .with_context(|| format!("reading subtitles {}", subtitles.display()))?;
         let cues = parse_subtitles(subtitles, &contents)
             .with_context(|| format!("parsing subtitles {}", subtitles.display()))?;
-        let font_size = effective_font_size(height, requested_font_size);
+        let font_size = effective_font_size(width, requested_font_size);
         let renderer = TextRenderer::new(width, height, font_name, fonts_dir)?;
         let timed_cues = cues.iter().filter(|cue| !cue.words.is_empty()).count();
         eprintln!(
@@ -163,7 +163,7 @@ impl TitleOverlay {
         fonts_dir: Option<&Path>,
         hold_seconds: f32,
     ) -> Result<Self> {
-        let font_size = effective_font_size(height, requested_font_size);
+        let font_size = effective_font_size(width, requested_font_size);
         let renderer = TextRenderer::new(width, height, font_name, fonts_dir)?;
         let hold_ms = (hold_seconds.max(0.0) * 1000.0).round() as u64;
         Ok(Self {
